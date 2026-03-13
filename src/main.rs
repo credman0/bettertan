@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 
 mod library_view;
+mod meme_storage;
+mod meme_view;
 mod ocr;
 mod storage;
 mod tagger;
@@ -30,7 +32,6 @@ fn init_tagger() -> SharedTagger {
 
 // ── Shared OCR handle ─────────────────────────────────────────────────────────
 
-/// `None` means OCR is still initialising (or failed to initialise).
 pub type SharedOcr = Arc<Mutex<Option<OcrEngine>>>;
 
 fn init_ocr() -> SharedOcr {
@@ -45,11 +46,11 @@ fn init_ocr() -> SharedOcr {
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-/// Current screen. Provided via context so any child can switch tabs.
 #[derive(Clone, PartialEq)]
 pub enum Tab {
     Tagger,
     Library,
+    Meme,
 }
 
 // ── Root component ────────────────────────────────────────────────────────────
@@ -58,15 +59,15 @@ fn App() -> Element {
     let _tagger = use_context_provider(init_tagger);
     let _ocr    = use_context_provider(init_ocr);
 
-    // Active tab — readable/writable by any descendant.
     let mut active_tab: Signal<Tab> = use_context_provider(|| {
         let tab = storage::load_ui_state().active_tab;
-        Signal::new(if tab == "library" { Tab::Library } else { Tab::Tagger })
+        Signal::new(match tab.as_str() {
+            "library" => Tab::Library,
+            "meme"    => Tab::Meme,
+            _         => Tab::Tagger,
+        })
     });
 
-    // Library sets this to a path; TaggerView picks it up, loads the image,
-    // but does NOT auto-run inference. Cleared after consumption.
-    // Initialised from saved state so the tagger restores its last image.
     let _pending: Signal<Option<PathBuf>> =
         use_context_provider(|| Signal::new(storage::load_ui_state().tagger_image));
 
@@ -74,13 +75,17 @@ fn App() -> Element {
         div {
             style: "display:flex; flex-direction:column; height:100vh; background:#0f0f11;",
 
+            // ── Nav bar ───────────────────────────────────────────────────────
             div {
-                style: "display:flex; align-items:stretch; padding:0 20px; border-bottom:1px solid #1e1e26; background:#13131a; flex-shrink:0; height:44px;",
+                style: "display:flex; align-items:stretch; padding:0 20px; \
+                        border-bottom:1px solid #1e1e26; background:#13131a; \
+                        flex-shrink:0; height:44px;",
 
                 div {
                     style: "display:flex; align-items:center; margin-right:28px;",
                     span {
-                        style: "font-size:11px; letter-spacing:0.18em; color:#383848; text-transform:uppercase; user-select:none;",
+                        style: "font-size:11px; letter-spacing:0.18em; color:#383848; \
+                                text-transform:uppercase; user-select:none;",
                         "Image Tagger"
                     }
                 }
@@ -101,13 +106,23 @@ fn App() -> Element {
                         let _ = storage::update_ui_state(|s| s.active_tab = "library".into());
                     },
                 }
+                NavTab {
+                    label: "Memes",
+                    active: *active_tab.read() == Tab::Meme,
+                    onclick: move |_| {
+                        *active_tab.write() = Tab::Meme;
+                        let _ = storage::update_ui_state(|s| s.active_tab = "meme".into());
+                    },
+                }
             }
 
+            // ── Content ───────────────────────────────────────────────────────
             div {
                 style: "flex:1; overflow:hidden;",
                 { match *active_tab.read() {
                     Tab::Tagger  => rsx! { tagger_view::TaggerView {} },
                     Tab::Library => rsx! { library_view::LibraryView {} },
+                    Tab::Meme    => rsx! { meme_view::MemeView {} },
                 } }
             }
         }
@@ -123,9 +138,13 @@ fn App() -> Element {
 #[component]
 fn NavTab(label: String, active: bool, onclick: EventHandler<MouseEvent>) -> Element {
     let s = if active {
-        "padding:0 18px; background:none; border:none; border-bottom:2px solid #5b8dee; color:#e8e6e3; font-family:inherit; font-size:11px; letter-spacing:0.12em; text-transform:uppercase; cursor:pointer; height:100%;"
+        "padding:0 18px; background:none; border:none; border-bottom:2px solid #5b8dee; \
+         color:#e8e6e3; font-family:inherit; font-size:11px; letter-spacing:0.12em; \
+         text-transform:uppercase; cursor:pointer; height:100%;"
     } else {
-        "padding:0 18px; background:none; border:none; border-bottom:2px solid transparent; color:#555; font-family:inherit; font-size:11px; letter-spacing:0.12em; text-transform:uppercase; cursor:pointer; height:100%;"
+        "padding:0 18px; background:none; border:none; border-bottom:2px solid transparent; \
+         color:#555; font-family:inherit; font-size:11px; letter-spacing:0.12em; \
+         text-transform:uppercase; cursor:pointer; height:100%;"
     };
     rsx! {
         button { style: "{s}", onclick: move |e| onclick.call(e), "{label}" }
