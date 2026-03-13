@@ -72,7 +72,7 @@ pub fn MemeView() -> Element {
 
             if let Some(idx) = *selected.read() {
                 if let Some(tmpl) = templates.read().get(idx).cloned() {
-                    MemeEditor { key: "{tmpl.id}", template: tmpl }
+                    MemeEditor { key: "{tmpl.id}", template: tmpl.clone() }
                 }
             }
         }
