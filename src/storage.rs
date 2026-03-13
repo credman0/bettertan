@@ -41,6 +41,8 @@ pub struct LibraryEntry {
     pub tags: Vec<(String, f32)>,
     /// User-supplied custom tags.
     pub custom_tags: Vec<String>,
+    /// OCR text extracted from the image, if available.
+    pub ocr_text: Option<String>,
 }
 
 impl LibraryEntry {
@@ -74,6 +76,7 @@ pub fn save_entry(
     src_image: &Path,
     model_tags: &[(String, f32)],
     custom_tags: &[String],
+    ocr_text: Option<&str>,
 ) -> Result<PathBuf> {
     let dir = ensure_data_dir()?;
 
@@ -85,7 +88,7 @@ pub fn save_entry(
     std::fs::copy(src_image, &dest)
         .with_context(|| format!("failed to copy image to {}", dest.display()))?;
 
-    write_idx(&idx_path_for(&dest), model_tags, custom_tags)?;
+    write_idx(&idx_path_for(&dest), model_tags, custom_tags, ocr_text)?;
 
     Ok(dest)
 }
@@ -98,14 +101,15 @@ pub fn save_or_update_entry(
     src_image: &Path,
     model_tags: &[(String, f32)],
     custom_tags: &[String],
+    ocr_text: Option<&str>,
 ) -> Result<PathBuf> {
     // If the image already lives inside the data dir, just rewrite its idx.
     if src_image.starts_with(data_dir()) {
-        write_idx(&idx_path_for(src_image), model_tags, custom_tags)?;
+        write_idx(&idx_path_for(src_image), model_tags, custom_tags, ocr_text)?;
         return Ok(src_image.to_path_buf());
     }
     // Otherwise do the full copy + idx write.
-    save_entry(src_image, model_tags, custom_tags)
+    save_entry(src_image, model_tags, custom_tags, ocr_text)
 }
 
 // ── Load ──────────────────────────────────────────────────────────────────────
@@ -156,8 +160,16 @@ pub fn load_all_entries() -> Vec<LibraryEntry> {
 /// [custom]
 /// golden hour
 /// portrait session
+/// [ocr]
+/// Any text detected in the image lives here.
+/// This section is always last; everything after [ocr] is raw text.
 /// ```
-fn write_idx(path: &Path, model_tags: &[(String, f32)], custom_tags: &[String]) -> Result<()> {
+fn write_idx(
+    path: &Path,
+    model_tags: &[(String, f32)],
+    custom_tags: &[String],
+    ocr_text: Option<&str>,
+) -> Result<()> {
     let mut out = String::from("# image tagger index v1\n[tags]\n");
     for (tag, score) in model_tags {
         out.push_str(&format!("{}={:.4}\n", tag, score));
@@ -170,6 +182,15 @@ fn write_idx(path: &Path, model_tags: &[(String, f32)], custom_tags: &[String]) 
             out.push('\n');
         }
     }
+    // [ocr] is always written last; its content is raw text to EOF.
+    if let Some(text) = ocr_text {
+        let text = text.trim();
+        if !text.is_empty() {
+            out.push_str("[ocr]\n");
+            out.push_str(text);
+            out.push('\n');
+        }
+    }
     std::fs::write(path, out).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -179,6 +200,7 @@ fn parse_idx(image_path: &Path, idx_path: &Path) -> Result<LibraryEntry> {
 
     let mut tags = Vec::new();
     let mut custom_tags = Vec::new();
+    let mut ocr_lines: Vec<&str> = Vec::new();
     let mut section = "";
 
     for line in text.lines() {
@@ -194,6 +216,10 @@ fn parse_idx(image_path: &Path, idx_path: &Path) -> Result<LibraryEntry> {
             section = "custom";
             continue;
         }
+        if line == "[ocr]" {
+            section = "ocr";
+            continue;
+        }
         match section {
             "tags" => {
                 if let Some((name, score_s)) = line.split_once('=') {
@@ -202,14 +228,22 @@ fn parse_idx(image_path: &Path, idx_path: &Path) -> Result<LibraryEntry> {
                 }
             }
             "custom" => custom_tags.push(line.to_owned()),
-            _ => {}
+            "ocr"    => ocr_lines.push(line),
+            _        => {}
         }
     }
+
+    let ocr_text = if ocr_lines.is_empty() {
+        None
+    } else {
+        Some(ocr_lines.join(" "))
+    };
 
     Ok(LibraryEntry {
         image_path: image_path.to_path_buf(),
         tags,
         custom_tags,
+        ocr_text,
     })
 }
 

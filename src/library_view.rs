@@ -124,7 +124,6 @@ fn LibraryCard(
 #[component]
 #[allow(non_snake_case)]
 fn DetailPanel(entry: LibraryEntry) -> Element {
-    // Context signals to navigate to the tagger with this image loaded.
     let mut pending_image = use_context::<Signal<Option<PathBuf>>>();
     let mut active_tab    = use_context::<Signal<Tab>>();
 
@@ -133,7 +132,6 @@ fn DetailPanel(entry: LibraryEntry) -> Element {
     let idx_name  = format!("{}.idx", name);
     let path_str  = entry.image_path.to_string_lossy().to_string();
 
-    // Comma-separated display strings
     let custom_csv: String = entry.custom_tags.join(", ");
     let model_csv: String  = entry.tags.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(", ");
 
@@ -168,11 +166,11 @@ fn DetailPanel(entry: LibraryEntry) -> Element {
                 }
             }
 
-            // Tag display — scrollable
+            // Tag + OCR display — scrollable
             div {
                 style: "flex:1; overflow-y:auto; padding:12px 14px;",
 
-                // Custom tags — comma-separated, shown first
+                // Custom tags — shown first
                 if !entry.custom_tags.is_empty() {
                     div {
                         style: "font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:#3a3a50; margin-bottom:6px;",
@@ -184,19 +182,31 @@ fn DetailPanel(entry: LibraryEntry) -> Element {
                     }
                 }
 
-                // Model tags — comma-separated
+                // Model tags
                 if !entry.tags.is_empty() {
                     div {
                         style: "font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:#3a3a50; margin-bottom:6px;",
                         "Model Tags"
                     }
                     div {
-                        style: "font-size:12px; color:#777; line-height:1.7; word-break:break-word;",
+                        style: "font-size:12px; color:#777; line-height:1.7; word-break:break-word; margin-bottom:14px;",
                         "{model_csv}"
                     }
                 }
 
-                if entry.tags.is_empty() && entry.custom_tags.is_empty() {
+                // OCR text — shown when present
+                if let Some(ref text) = entry.ocr_text {
+                    div {
+                        style: "font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:#3a4a5a; margin-bottom:6px;",
+                        "OCR Text"
+                    }
+                    div {
+                        style: "font-size:11px; color:#7a9abb; line-height:1.7; word-break:break-word; white-space:pre-wrap;",
+                        "{text}"
+                    }
+                }
+
+                if entry.tags.is_empty() && entry.custom_tags.is_empty() && entry.ocr_text.is_none() {
                     div {
                         style: "font-size:11px; color:#2e2e3a; text-align:center; padding-top:20px; letter-spacing:0.08em;",
                         "no tags recorded"

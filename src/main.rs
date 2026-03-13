@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 mod library_view;
+mod ocr;
 mod storage;
 mod tagger;
 mod tagger_view;
@@ -11,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dioxus::prelude::*;
 use tagger::Tagger;
+use ocr::OcrEngine;
 
 // ── Shared tagger handle ──────────────────────────────────────────────────────
 
@@ -22,6 +24,21 @@ fn init_tagger() -> SharedTagger {
     std::thread::spawn(move || match Tagger::new() {
         Ok(t) => *clone.lock().unwrap() = Some(t),
         Err(e) => eprintln!("Failed to initialise tagger: {e}"),
+    });
+    shared
+}
+
+// ── Shared OCR handle ─────────────────────────────────────────────────────────
+
+/// `None` means OCR is still initialising (or failed to initialise).
+pub type SharedOcr = Arc<Mutex<Option<OcrEngine>>>;
+
+fn init_ocr() -> SharedOcr {
+    let shared: SharedOcr = Arc::new(Mutex::new(None));
+    let clone = Arc::clone(&shared);
+    std::thread::spawn(move || match OcrEngine::new() {
+        Ok(engine) => *clone.lock().unwrap() = Some(engine),
+        Err(e) => eprintln!("OCR not available: {e}"),
     });
     shared
 }
@@ -39,6 +56,7 @@ pub enum Tab {
 
 fn App() -> Element {
     let _tagger = use_context_provider(init_tagger);
+    let _ocr    = use_context_provider(init_ocr);
 
     // Active tab — readable/writable by any descendant.
     let mut active_tab: Signal<Tab> = use_context_provider(|| Signal::new(Tab::Tagger));
@@ -94,7 +112,6 @@ fn App() -> Element {
 
 #[component]
 fn NavTab(label: String, active: bool, onclick: EventHandler<MouseEvent>) -> Element {
-    // Pre-compute style to avoid multiline interpolation inside rsx!
     let s = if active {
         "padding:0 18px; background:none; border:none; border-bottom:2px solid #5b8dee; color:#e8e6e3; font-family:inherit; font-size:11px; letter-spacing:0.12em; text-transform:uppercase; cursor:pointer; height:100%;"
     } else {

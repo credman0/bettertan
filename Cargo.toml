@@ -11,6 +11,6 @@ image = "0.25.9"
 ndarray = "0.17.2"
 num_cpus = "1.17.0"
 ort = "=2.0.0-rc.12"
-paddle-ocr-rs = "0.6.1"
+paddle-ocr-rs = { path = "/home/credman0/Downloads/paddle-ocr-rs" }
 rfd = "0.17.2"
 tokio = "1.50.0"

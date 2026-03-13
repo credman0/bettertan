@@ -7,7 +7,7 @@ use crate::{
     image_to_data_url,
     storage,
     tagger::{TagOptions, TagOutput, TagResult},
-    SharedTagger, Tab,
+    SharedOcr, SharedTagger, Tab,
 };
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -15,6 +15,7 @@ use crate::{
 #[allow(non_snake_case)]
 pub fn TaggerView() -> Element {
     let tagger = use_context::<SharedTagger>();
+    let ocr    = use_context::<SharedOcr>();
 
     // Shared context signals written by LibraryView's "Open in Tagger" button.
     let mut pending_image = use_context::<Signal<Option<PathBuf>>>();
@@ -27,16 +28,16 @@ pub fn TaggerView() -> Element {
     let mut threshold   = use_signal(|| 0.68_f32);
 
     // Custom tag chip state
-    let mut tag_input: Signal<String>    = use_signal(String::new);
-    let mut custom_tags: Signal<Vec<String>> = use_signal(Vec::new);
+    let mut tag_input: Signal<String>         = use_signal(String::new);
+    let mut custom_tags: Signal<Vec<String>>  = use_signal(Vec::new);
+
+    // OCR text extracted from the current image (None = not yet run / no text)
+    let mut ocr_text: Signal<Option<String>>  = use_signal(|| None);
 
     // Save result notification
     let mut save_status: Signal<Option<Result<String, String>>> = use_signal(|| None);
 
     // ── Consume pending_image set by LibraryView ───────────────────────────────
-    // Runs whenever `pending_image` changes. Loads the image display and
-    // restores any previously saved tags. Does NOT trigger new inference —
-    // the user must press "Run Tagger" explicitly.
     use_effect(move || {
         let maybe = pending_image.read().clone();
         if let Some(path) = maybe {
@@ -44,7 +45,7 @@ pub fn TaggerView() -> Element {
             tag_input.set(String::new());
             save_status.set(None);
 
-            // Restore tags from the existing library entry, if present.
+            // Restore tags + OCR from the existing library entry, if present.
             let existing = storage::load_all_entries()
                 .into_iter()
                 .find(|e| e.image_path == path);
@@ -61,40 +62,60 @@ pub fn TaggerView() -> Element {
                 };
                 raw_output.set(Some(Ok(output)));
                 custom_tags.set(entry.custom_tags.clone());
+                ocr_text.set(entry.ocr_text.clone());
             } else {
                 raw_output.set(None);
                 custom_tags.write().clear();
+                ocr_text.set(None);
             }
 
             image_path.set(Some(path));
-            // Consume — clear so re-navigating to Tagger doesn't reload.
             pending_image.set(None);
         }
     });
 
-    // ── Run inference ──────────────────────────────────────────────────────────
+    // ── Run inference + OCR ────────────────────────────────────────────────────
     let mut run_inference = move |path: PathBuf| {
         is_loading.set(true);
         raw_output.set(None);
+        ocr_text.set(None);
         save_status.set(None);
 
         let tagger_arc = Arc::clone(&tagger);
+        let ocr_arc    = Arc::clone(&ocr);
         let path_str   = path.to_string_lossy().to_string();
         let opts = TagOptions { threshold: 0.0, topk: 6000 };
 
         spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let mut guard = tagger_arc.lock().unwrap();
-                match guard.as_mut() {
-                    Some(t) => t.tag_image(&path_str, opts).map_err(|e| e.to_string()),
-                    None    => Err("Tagger still initialising — please try again.".into()),
-                }
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let (tag_result, ocr_result) =
+                tokio::task::spawn_blocking(move || {
+                    // Run tagging
+                    let tags = {
+                        let mut guard = tagger_arc.lock().unwrap();
+                        match guard.as_mut() {
+                            Some(t) => t.tag_image(&path_str, opts).map_err(|e| e.to_string()),
+                            None    => Err("Tagger still initialising — please try again.".into()),
+                        }
+                    };
 
-            // Auto-save to library on success.
-            if let Ok(ref output) = result {
+                    // Run OCR (best-effort; failure just means no text is stored)
+                    let ocr = {
+                        let mut guard = ocr_arc.lock().unwrap();
+                        guard
+                            .as_mut()
+                            .and_then(|eng| eng.extract_text(&path_str).ok())
+                    };
+
+                    (tags, ocr)
+                })
+                .await
+                .unwrap_or_else(|e| (Err(e.to_string()), None));
+
+            // Update OCR signal
+            ocr_text.set(ocr_result.clone());
+
+            // Auto-save to library on successful tagging.
+            if let Ok(ref output) = tag_result {
                 let thresh = *threshold.read();
                 let model_tags: Vec<(String, f32)> = output
                     .topk.iter()
@@ -102,10 +123,14 @@ pub fn TaggerView() -> Element {
                     .map(|t| (t.tag.clone(), t.score))
                     .collect();
                 let custom: Vec<String> = custom_tags.read().clone();
-                match storage::save_or_update_entry(&path, &model_tags, &custom) {
+                let ocr: Option<String> = ocr_result.clone();
+                match storage::save_or_update_entry(
+                    &path,
+                    &model_tags,
+                    &custom,
+                    ocr.as_deref(),
+                ) {
                     Ok(dest) => {
-                        // Point image_path at the data-dir copy so future saves
-                        // update in-place rather than duplicating the file.
                         image_path.set(Some(dest.clone()));
                         save_status.set(Some(Ok(format!("Saved → {}", dest.display()))));
                     }
@@ -113,7 +138,7 @@ pub fn TaggerView() -> Element {
                 }
             }
 
-            raw_output.set(Some(result));
+            raw_output.set(Some(tag_result));
             is_loading.set(false);
         });
     };
@@ -127,6 +152,7 @@ pub fn TaggerView() -> Element {
             image_src.set(image_to_data_url(&path));
             image_path.set(Some(path));
             raw_output.set(None);
+            ocr_text.set(None);
             save_status.set(None);
             custom_tags.write().clear();
             tag_input.set(String::new());
@@ -146,8 +172,9 @@ pub fn TaggerView() -> Element {
             .collect();
 
         let custom: Vec<String> = custom_tags.read().clone();
+        let ocr: Option<String> = ocr_text.read().clone();
 
-        match storage::save_entry(&path, &model_tags, &custom) {
+        match storage::save_entry(&path, &model_tags, &custom, ocr.as_deref()) {
             Ok(dest) => save_status.set(Some(Ok(format!("Saved → {}", dest.display())))),
             Err(e)   => save_status.set(Some(Err(e.to_string()))),
         }
@@ -238,11 +265,11 @@ pub fn TaggerView() -> Element {
                     }
                 }
 
-                // Right: tags + custom input
+                // Right: tags + OCR + custom input
                 div {
                     style: "width:50%; display:flex; flex-direction:column; overflow:hidden;",
 
-                    // Tag results panel
+                    // Tag results panel (scrollable, takes remaining space)
                     div {
                         style: "flex:1; display:flex; flex-direction:column; overflow:hidden; min-height:0;",
 
@@ -274,6 +301,25 @@ pub fn TaggerView() -> Element {
                         }
                     }
 
+                    // OCR text panel — only shown when text is present
+                    if let Some(ref text) = *ocr_text.read() {
+                        div {
+                            style: "border-top:1px solid #1e1e26; padding:10px 16px; flex-shrink:0; background:#0b0b0e; max-height:130px; display:flex; flex-direction:column;",
+
+                            div {
+                                style: "font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:#3a4a5a; margin-bottom:6px; flex-shrink:0;",
+                                "OCR Text"
+                            }
+                            div {
+                                style: "overflow-y:auto; flex:1;",
+                                p {
+                                    style: "font-size:11px; color:#7a9abb; line-height:1.6; word-break:break-word; white-space:pre-wrap;",
+                                    "{text}"
+                                }
+                            }
+                        }
+                    }
+
                     // Custom tags footer
                     div {
                         style: "border-top:1px solid #1e1e26; padding:12px 16px; flex-shrink:0; background:#0d0d10;",
@@ -293,7 +339,6 @@ pub fn TaggerView() -> Element {
                                         label: tag.clone(),
                                         on_remove: move |_| {
                                             custom_tags.write().remove(i);
-                                            // Auto-save the updated tag list.
                                             if let Some(path) = image_path.read().clone() {
                                                 if let Some(Ok(ref output)) = *raw_output.read() {
                                                     let thresh = *threshold.read();
@@ -303,7 +348,13 @@ pub fn TaggerView() -> Element {
                                                         .map(|t| (t.tag.clone(), t.score))
                                                         .collect();
                                                     let custom: Vec<String> = custom_tags.read().clone();
-                                                    match storage::save_or_update_entry(&path, &model_tags, &custom) {
+                                                    let ocr: Option<String> = ocr_text.read().clone();
+                                                    match storage::save_or_update_entry(
+                                                        &path,
+                                                        &model_tags,
+                                                        &custom,
+                                                        ocr.as_deref(),
+                                                    ) {
                                                         Ok(dest) => save_status.set(Some(Ok(format!("Saved → {}", dest.display())))),
                                                         Err(e)   => save_status.set(Some(Err(e.to_string()))),
                                                     }
@@ -339,7 +390,13 @@ pub fn TaggerView() -> Element {
                                                 .map(|t| (t.tag.clone(), t.score))
                                                 .collect();
                                             let custom: Vec<String> = custom_tags.read().clone();
-                                            match storage::save_or_update_entry(&path, &model_tags, &custom) {
+                                            let ocr: Option<String> = ocr_text.read().clone();
+                                            match storage::save_or_update_entry(
+                                                &path,
+                                                &model_tags,
+                                                &custom,
+                                                ocr.as_deref(),
+                                            ) {
                                                 Ok(dest) => save_status.set(Some(Ok(format!("Saved → {}", dest.display())))),
                                                 Err(e)   => save_status.set(Some(Err(e.to_string()))),
                                             }
