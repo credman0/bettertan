@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 use crate::{
     image_to_data_url, image_to_thumbnail_url,
     meme_storage::{self, MemeTemplate},
+    search,
 };
 
 // ── Main view ─────────────────────────────────────────────────────────────────
@@ -15,6 +16,7 @@ pub fn MemeView() -> Element {
     let mut templates: Signal<Vec<MemeTemplate>> = use_signal(meme_storage::load_templates);
     let mut selected:  Signal<Option<String>>     = use_signal(|| None);
     let mut favorites: Signal<HashSet<String>>    = use_signal(meme_storage::load_favorites);
+    let mut query:     Signal<String>             = use_signal(String::new);
 
     let refresh = move |_| {
         templates.set(meme_storage::load_templates());
@@ -25,21 +27,43 @@ pub fn MemeView() -> Element {
     let all_templates = templates.read().clone();
     let fav_set       = favorites.read().clone();
     let selected_id   = selected.read().clone();
+    let query_str     = query.read().clone();
 
-    let fav_templates: Vec<MemeTemplate> = all_templates.iter()
-        .filter(|t| fav_set.contains(&t.id))
-        .cloned()
-        .collect();
-    let rest_templates: Vec<MemeTemplate> = all_templates.iter()
-        .filter(|t| !fav_set.contains(&t.id))
-        .cloned()
-        .collect();
+    let searching = !query_str.trim().is_empty();
+
+    // Search-sorted indices over all templates.
+    let sorted_indices = search::search_templates(&all_templates, &query_str);
+
+    // When not searching, keep the existing favorites / rest split.
+    let fav_templates: Vec<MemeTemplate> = if !searching {
+        sorted_indices.iter()
+            .filter(|&&i| fav_set.contains(&all_templates[i].id))
+            .map(|&i| all_templates[i].clone())
+            .collect()
+    } else {
+        vec![]
+    };
+    let rest_templates: Vec<MemeTemplate> = if !searching {
+        sorted_indices.iter()
+            .filter(|&&i| !fav_set.contains(&all_templates[i].id))
+            .map(|&i| all_templates[i].clone())
+            .collect()
+    } else {
+        // When searching show all sorted results in a single flat list.
+        sorted_indices.iter()
+            .map(|&i| all_templates[i].clone())
+            .collect()
+    };
 
     let selected_tmpl: Option<(String, MemeTemplate)> = selected_id.as_ref()
         .and_then(|id| all_templates.iter().find(|t| &t.id == id).map(|t| (t.id.clone(), t.clone())));
 
     let count       = all_templates.len();
-    let count_label = format!("{} template{}", count, if count == 1 { "" } else { "s" });
+    let count_label = if searching {
+        format!("{} / {} template{}", rest_templates.len(), count, if count == 1 { "" } else { "s" })
+    } else {
+        format!("{} template{}", count, if count == 1 { "" } else { "s" })
+    };
     let has_favs    = !fav_templates.is_empty();
 
     rsx! {
@@ -52,16 +76,26 @@ pub fn MemeView() -> Element {
                 div {
                     style: "display:flex; align-items:center; gap:12px; padding:9px 20px; border-bottom:1px solid #1e1e26; background:#13131a; flex-shrink:0;",
                     span {
-                        style: "font-size:10px; color:#555; letter-spacing:0.12em; text-transform:uppercase;",
+                        style: "font-size:10px; color:#555; letter-spacing:0.12em; text-transform:uppercase; flex-shrink:0;",
                         "{count_label}"
                     }
-                    div { style: "flex:1;" }
+                    // Search bar
+                    input {
+                        r#type: "text",
+                        placeholder: "Search name, keywords…",
+                        value: "{query_str}",
+                        oninput: move |e| {
+                            query.set(e.value());
+                            selected.set(None);
+                        },
+                        style: "flex:1; min-width:0; background:#0d0d14; border:1px solid #2a2a38; border-radius:4px; padding:5px 10px; color:#ccc; font-family:inherit; font-size:11px; letter-spacing:0.04em; outline:none;",
+                    }
                     span {
-                        style: "font-size:10px; color:#2e2e3e; letter-spacing:0.08em;",
+                        style: "font-size:10px; color:#2e2e3e; letter-spacing:0.08em; flex-shrink:0;",
                         "~/.image_tagger/templates/"
                     }
                     button {
-                        style: "padding:6px 14px; background:#1a1a26; color:#888; border:1px solid #2a2a38; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer;",
+                        style: "padding:6px 14px; background:#1a1a26; color:#888; border:1px solid #2a2a38; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer; flex-shrink:0;",
                         onclick: refresh,
                         "↺  Refresh"
                     }
@@ -71,7 +105,39 @@ pub fn MemeView() -> Element {
                     style: "flex:1; overflow-y:auto; padding:20px;",
                     if all_templates.is_empty() {
                         EmptyTemplates {}
+                    } else if searching {
+                        // Flat relevance-sorted results when a query is active.
+                        if rest_templates.is_empty() {
+                            div {
+                                style: "font-size:11px; color:#2e2e3a; text-align:center; padding-top:40px; letter-spacing:0.08em;",
+                                "No matching templates"
+                            }
+                        } else {
+                            div {
+                                style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px;",
+                                for tmpl in rest_templates.iter() {
+                                    TemplateCard {
+                                        key: "{tmpl.id}",
+                                        template: tmpl.clone(),
+                                        selected: selected_id.as_deref() == Some(tmpl.id.as_str()),
+                                        favorited: fav_set.contains(&tmpl.id),
+                                        onclick: {
+                                            let id = tmpl.id.clone();
+                                            move |_| {
+                                                let new = if selected.read().as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+                                                selected.set(new);
+                                            }
+                                        },
+                                        on_toggle_favorite: {
+                                            let id = tmpl.id.clone();
+                                            move |_| { favorites.set(meme_storage::toggle_favorite(&id)); }
+                                        },
+                                    }
+                                }
+                            }
+                        }
                     } else {
+                        // Normal (non-search) layout: favorites section + rest.
                         // Favorites section
                         if has_favs {
                             div {

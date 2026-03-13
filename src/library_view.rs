@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use crate::{image_to_data_url, storage::{self, LibraryEntry, update_ui_state}, Tab};
+use crate::{image_to_data_url, search, storage::{self, LibraryEntry, update_ui_state}, Tab};
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -16,12 +16,21 @@ pub fn LibraryView() -> Element {
 
     let mut entries: Signal<Vec<LibraryEntry>> = use_signal(|| initial_entries);
     let mut selected: Signal<Option<usize>>    = use_signal(|| restore_idx);
+    let mut query:    Signal<String>           = use_signal(String::new);
 
     let refresh = move |_| {
         entries.set(storage::load_all_entries());
         selected.set(None);
         let _ = update_ui_state(|s| s.library_selected = None);
     };
+
+    // Compute visible indices (search-sorted or original order).
+    let visible_indices: Vec<usize> = {
+        let q = query.read().clone();
+        let all = entries.read();
+        search::search_library(&all, &q)
+    };
+    let visible_count = visible_indices.len();
 
     rsx! {
         div {
@@ -35,13 +44,23 @@ pub fn LibraryView() -> Element {
                 div {
                     style: "display:flex; align-items:center; gap:12px; padding:9px 20px; border-bottom:1px solid #1e1e26; background:#13131a; flex-shrink:0;",
                     span {
-                        style: "font-size:10px; color:#555; letter-spacing:0.12em; text-transform:uppercase;",
-                        "{entries.read().len()} images"
+                        style: "font-size:10px; color:#555; letter-spacing:0.12em; text-transform:uppercase; flex-shrink:0;",
+                        "{visible_count} images"
                     }
-                    div { style: "flex:1;" }
-                    span { style: "font-size:10px; color:#2e2e3e; letter-spacing:0.08em;", "~/.image_tagger/" }
+                    // Search bar
+                    input {
+                        r#type: "text",
+                        placeholder: "Search tags, filename, OCR…",
+                        value: "{query}",
+                        oninput: move |e| {
+                            query.set(e.value());
+                            selected.set(None);
+                        },
+                        style: "flex:1; min-width:0; background:#0d0d14; border:1px solid #2a2a38; border-radius:4px; padding:5px 10px; color:#ccc; font-family:inherit; font-size:11px; letter-spacing:0.04em; outline:none;",
+                    }
+                    span { style: "font-size:10px; color:#2e2e3e; letter-spacing:0.08em; flex-shrink:0;", "~/.image_tagger/" }
                     button {
-                        style: "padding:6px 14px; background:#1a1a26; color:#888; border:1px solid #2a2a38; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer;",
+                        style: "padding:6px 14px; background:#1a1a26; color:#888; border:1px solid #2a2a38; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer; flex-shrink:0;",
                         onclick: refresh,
                         "↺  Refresh"
                     }
@@ -55,13 +74,13 @@ pub fn LibraryView() -> Element {
                     } else {
                         div {
                             style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px;",
-                            for (i, entry) in entries.read().iter().enumerate() {
+                            for (_, orig_i) in visible_indices.iter().copied().enumerate() {
                                 LibraryCard {
-                                    key: "{i}",
-                                    entry: entry.clone(),
-                                    selected: *selected.read() == Some(i),
+                                    key: "{orig_i}",
+                                    entry: entries.read()[orig_i].clone(),
+                                    selected: *selected.read() == Some(orig_i),
                                     onclick: move |_| {
-                                        let new_sel = if *selected.read() == Some(i) { None } else { Some(i) };
+                                        let new_sel = if *selected.read() == Some(orig_i) { None } else { Some(orig_i) };
                                         selected.set(new_sel);
                                         let path = new_sel.and_then(|i| entries.read().get(i).map(|e| e.image_path.clone()));
                                         let _ = update_ui_state(|s| s.library_selected = path);

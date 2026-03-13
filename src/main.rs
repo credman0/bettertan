@@ -4,6 +4,7 @@ mod library_view;
 mod meme_storage;
 mod meme_view;
 mod ocr;
+mod search;
 mod storage;
 mod tagger;
 mod tagger_view;
