@@ -90,6 +90,24 @@ pub fn save_entry(
     Ok(dest)
 }
 
+/// Update the `.idx` sidecar for an image that is **already in the data dir**,
+/// or copy it in and write a fresh sidecar if it is not.
+///
+/// Returns the path of the image in the data dir (unchanged when in-place).
+pub fn save_or_update_entry(
+    src_image: &Path,
+    model_tags: &[(String, f32)],
+    custom_tags: &[String],
+) -> Result<PathBuf> {
+    // If the image already lives inside the data dir, just rewrite its idx.
+    if src_image.starts_with(data_dir()) {
+        write_idx(&idx_path_for(src_image), model_tags, custom_tags)?;
+        return Ok(src_image.to_path_buf());
+    }
+    // Otherwise do the full copy + idx write.
+    save_entry(src_image, model_tags, custom_tags)
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 /// Scan the data dir and return every (image, idx) pair that is well-formed.
