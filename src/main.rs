@@ -185,8 +185,8 @@ pub fn image_to_thumbnail_url(path: &PathBuf, max_px: u32) -> Option<String> {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
-    // Force XWayland to avoid GTK Wayland protocol errors with WebKitGTK.
-    unsafe { std::env::set_var("GDK_BACKEND", "x11"); }
+    // Disable WebKit GPU compositing to avoid Wayland protocol errors.
+    unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1"); }
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             dioxus::desktop::Config::new()
