@@ -24,6 +24,29 @@ pub fn LibraryView() -> Element {
         let _ = update_ui_state(|s| s.library_selected = None);
     };
 
+    // Inject a one-time JS handler so dragging any [data-file-path] element
+    // sets text/uri-list in the DataTransfer.  WebKit2GTK propagates that MIME
+    // type to the native GDK drag protocol, letting other apps receive the file.
+    use_effect(move || {
+        document::eval(r#"
+            if (!window.__bettertan_drag_installed) {
+                window.__bettertan_drag_installed = true;
+                document.addEventListener('dragstart', function(e) {
+                    var el = e.target;
+                    while (el && !el.getAttribute('data-file-path')) {
+                        el = el.parentElement;
+                    }
+                    if (!el) return;
+                    var path = el.getAttribute('data-file-path');
+                    var fileUrl = encodeURI('file://' + path);
+                    e.dataTransfer.effectAllowed = 'copy';
+                    e.dataTransfer.setData('text/uri-list', fileUrl + '\r\n');
+                    e.dataTransfer.setData('text/plain', fileUrl);
+                }, true);
+            }
+        "#);
+    });
+
     // Compute visible indices (search-sorted or original order).
     // Pair each index with a stable path key to avoid thumbnail cache mismatches
     // when entries are deleted/reordered.
@@ -148,12 +171,14 @@ fn LibraryCard(
     rsx! {
         div {
             style: "{card_style}",
+            draggable: "true",
+            "data-file-path": "{entry.image_path.to_string_lossy()}",
             onclick: move |e| onclick.call(e),
 
             div {
                 style: "width:100%; aspect-ratio:1/1; overflow:hidden; background:#0c0c0e;",
                 if let Some(src) = data_url {
-                    img { src: "{src}", style: "width:100%; height:100%; object-fit:cover; display:block;" }
+                    img { src: "{src}", draggable: "false", style: "width:100%; height:100%; object-fit:cover; display:block;" }
                 } else {
                     div {
                         style: "width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#2e2e3a; font-size:10px;",
@@ -198,8 +223,10 @@ fn DetailPanel(entry: LibraryEntry, on_delete: EventHandler<MouseEvent>) -> Elem
             // Thumbnail
             div {
                 style: "width:100%; aspect-ratio:1/1; background:#0c0c0e; flex-shrink:0; overflow:hidden;",
+                draggable: "true",
+                "data-file-path": "{entry.image_path.to_string_lossy()}",
                 if let Some(src) = data_url {
-                    img { src: "{src}", style: "width:100%; height:100%; object-fit:contain; display:block;" }
+                    img { src: "{src}", draggable: "false", style: "width:100%; height:100%; object-fit:contain; display:block;" }
                 }
             }
 
