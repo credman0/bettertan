@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 
 use crate::{
-    image_to_data_url,
+    image_to_data_url, image_to_thumbnail_url,
     meme_storage::{self, MemeTemplate},
 };
 
@@ -21,6 +21,8 @@ pub fn MemeView() -> Element {
 
     let count = templates.read().len();
     let count_label = format!("{} template{}", count, if count == 1 { "" } else { "s" });
+    let selected_tmpl: Option<(String, MemeTemplate)> = (*selected.read())
+        .and_then(|idx| templates.read().get(idx).map(|t| (t.id.clone(), t.clone())));
 
     rsx! {
         div {
@@ -70,10 +72,8 @@ pub fn MemeView() -> Element {
                 }
             }
 
-            if let Some(idx) = *selected.read() {
-                if let Some(tmpl) = templates.read().get(idx).cloned() {
-                    MemeEditor { key: "{tmpl.id}", template: tmpl.clone() }
-                }
+            if let Some((tmpl_id, tmpl)) = selected_tmpl {
+                MemeEditor { key: "{tmpl_id}", template: tmpl }
             }
         }
     }
@@ -88,7 +88,7 @@ fn TemplateCard(
     selected: bool,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
-    let data_url   = image_to_data_url(&template.image_path);
+    let data_url   = image_to_thumbnail_url(&template.image_path, 200);
     let name       = template.display_name().to_string();
     let n_fields   = template.text_field_count();
     let field_label = format!("{} text field{}", n_fields, if n_fields == 1 { "" } else { "s" });

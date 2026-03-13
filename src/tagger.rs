@@ -6,13 +6,24 @@ use ort::{
     value::TensorRef,
 };
 
-// ── Embedded resources ────────────────────────────────────────────────────────
-
-static MODEL_BYTES: &[u8] =
-    include_bytes!("../resources/ram_plus_swin_large_14m.onnx");
-
 static TAGS_TEXT: &str =
     include_str!("../resources/ram_tag_list.txt");
+
+fn model_path() -> std::path::PathBuf {
+    // Look next to the executable first, then fall back to the source-tree location.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    if let Some(dir) = exe_dir {
+        let candidate = dir.join("ram_plus_swin_large_14m.onnx");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Dev fallback: resources/ relative to the workspace root
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources/ram_plus_swin_large_14m.onnx")
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -72,15 +83,16 @@ impl Tagger {
     pub fn new() -> Result<Self> {
         let tags = parse_tags(TAGS_TEXT);
 
+        let path = model_path();
         let session = Session::builder()
             .map_err(ort_err)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(ort_err)?
             .with_intra_threads(num_cpus::get().min(4) as usize)
             .map_err(ort_err)?
-            .commit_from_memory(MODEL_BYTES)
+            .commit_from_file(&path)
             .map_err(ort_err)
-            .context("failed to initialise ONNX session from embedded model")?;
+            .with_context(|| format!("failed to load ONNX model from {}", path.display()))?;
 
         Ok(Self { session, tags })
     }

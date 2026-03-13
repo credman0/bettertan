@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use crate::{image_to_data_url, storage::{self, LibraryEntry, update_ui_state}, Tab};
+use crate::{image_to_data_url, image_to_thumbnail_url, storage::{self, LibraryEntry, update_ui_state}, Tab};
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -92,7 +92,7 @@ fn LibraryCard(
     selected: bool,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
-    let data_url = image_to_data_url(&entry.image_path);
+    let data_url = image_to_thumbnail_url(&entry.image_path, 200);
     let name     = entry.image_file_name();
     let tag_count = entry.tags.len() + entry.custom_tags.len();
     let tag_label = format!("{} tag{}", tag_count, if tag_count == 1 { "" } else { "s" });

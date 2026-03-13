@@ -167,9 +167,26 @@ pub fn image_to_data_url(path: &PathBuf) -> Option<String> {
     Some(format!("data:{mime};base64,{}", BASE64.encode(&bytes)))
 }
 
+/// Like `image_to_data_url` but resizes to a small thumbnail first.
+/// Use this for grid cards to avoid loading full-res images into memory.
+pub fn image_to_thumbnail_url(path: &PathBuf, max_px: u32) -> Option<String> {
+    let img = image::open(path).ok()?;
+    let thumb = img.thumbnail(max_px, max_px);
+    let mut buf = Vec::new();
+    thumb
+        .write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
+        .ok()?;
+    Some(format!("data:image/jpeg;base64,{}", BASE64.encode(&buf)))
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
+    // Force XWayland to avoid GTK Wayland protocol errors with WebKitGTK.
+    unsafe { std::env::set_var("GDK_BACKEND", "x11"); }
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             dioxus::desktop::Config::new()
