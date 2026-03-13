@@ -2,12 +2,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
+use dioxus::desktop::use_window;
+use dioxus::desktop::wry::WebViewExtUnix;
+use futures_util::StreamExt;
+use gtk::prelude::*;
 
 use crate::{
     image_to_data_url,
     storage,
     tagger::{TagOptions, TagOutput, TagResult},
-    SharedOcr, SharedTagger, Tab,
+    SharedOcr, SharedTagger,
 };
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -37,57 +41,22 @@ pub fn TaggerView() -> Element {
     // Save result notification
     let mut save_status: Signal<Option<Result<String, String>>> = use_signal(|| None);
 
-    // ── Consume pending_image set by LibraryView ───────────────────────────────
-    use_effect(move || {
-        let maybe = pending_image.read().clone();
-        if let Some(path) = maybe {
-            image_src.set(image_to_data_url(&path));
-            let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
-            tag_input.set(String::new());
+    // ── Run inference + OCR ────────────────────────────────────────────────────
+    let run_inference = use_coroutine(move |mut rx: UnboundedReceiver<PathBuf>| {
+        let tagger = Arc::clone(&tagger);
+        let ocr    = Arc::clone(&ocr);
+        async move {
+        while let Some(path) = rx.next().await {
+            is_loading.set(true);
+            raw_output.set(None);
+            ocr_text.set(None);
             save_status.set(None);
 
-            // Restore tags + OCR from the existing library entry, if present.
-            let existing = storage::load_all_entries()
-                .into_iter()
-                .find(|e| e.image_path == path);
+            let tagger_arc = Arc::clone(&tagger);
+            let ocr_arc    = Arc::clone(&ocr);
+            let path_str   = path.to_string_lossy().to_string();
+            let opts = TagOptions { threshold: 0.0, topk: 6000 };
 
-            if let Some(entry) = existing {
-                let tag_results: Vec<TagResult> = entry
-                    .tags
-                    .iter()
-                    .map(|(t, s)| TagResult { tag: t.clone(), score: *s })
-                    .collect();
-                let output = crate::tagger::TagOutput {
-                    above_threshold: tag_results.clone(),
-                    topk: tag_results,
-                };
-                raw_output.set(Some(Ok(output)));
-                custom_tags.set(entry.custom_tags.clone());
-                ocr_text.set(entry.ocr_text.clone());
-            } else {
-                raw_output.set(None);
-                custom_tags.write().clear();
-                ocr_text.set(None);
-            }
-
-            image_path.set(Some(path));
-            pending_image.set(None);
-        }
-    });
-
-    // ── Run inference + OCR ────────────────────────────────────────────────────
-    let mut run_inference = move |path: PathBuf| {
-        is_loading.set(true);
-        raw_output.set(None);
-        ocr_text.set(None);
-        save_status.set(None);
-
-        let tagger_arc = Arc::clone(&tagger);
-        let ocr_arc    = Arc::clone(&ocr);
-        let path_str   = path.to_string_lossy().to_string();
-        let opts = TagOptions { threshold: 0.0, topk: 6000 };
-
-        spawn(async move {
             let (tag_result, ocr_result) =
                 tokio::task::spawn_blocking(move || {
                     // Run tagging
@@ -141,8 +110,36 @@ pub fn TaggerView() -> Element {
 
             raw_output.set(Some(tag_result));
             is_loading.set(false);
-        });
-    };
+        }
+    }});
+
+    // ── Consume pending_image set by LibraryView ───────────────────────────────
+    use_effect(move || {
+        let maybe = pending_image.read().clone();
+        if let Some(path) = maybe {
+            image_src.set(image_to_data_url(&path));
+            let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
+            tag_input.set(String::new());
+            save_status.set(None);
+            raw_output.set(None);
+            ocr_text.set(None);
+
+            // Restore custom tags from the existing library entry, if present.
+            let existing = storage::load_all_entries()
+                .into_iter()
+                .find(|e| e.image_path == path);
+
+            if let Some(entry) = existing {
+                custom_tags.set(entry.custom_tags.clone());
+            } else {
+                custom_tags.write().clear();
+            }
+
+            image_path.set(Some(path.clone()));
+            run_inference.send(path);
+            pending_image.set(None);
+        }
+    });
 
     // ── File picker ────────────────────────────────────────────────────────────
     let open_file = move |_| {
@@ -152,14 +149,98 @@ pub fn TaggerView() -> Element {
         {
             image_src.set(image_to_data_url(&path));
             let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
-            image_path.set(Some(path));
+            image_path.set(Some(path.clone()));
             raw_output.set(None);
             ocr_text.set(None);
             save_status.set(None);
             custom_tags.write().clear();
             tag_input.set(String::new());
+            run_inference.send(path);
         }
     };
+
+    // ── Native GTK drag-drop handler (Linux: attach our own signal handlers) ─
+    use_effect(move || {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+        let image_exts = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"];
+
+        // Wire the channel receiver → Dioxus signals
+        spawn(async move {
+            while let Some(path) = rx.recv().await {
+                let ext = path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if image_exts.contains(&ext.as_str()) {
+                    image_src.set(image_to_data_url(&path));
+                    let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
+                    image_path.set(Some(path.clone()));
+                    raw_output.set(None);
+                    ocr_text.set(None);
+                    save_status.set(None);
+                    custom_tags.write().clear();
+                    tag_input.set(String::new());
+                    run_inference.send(path);
+                }
+            }
+        });
+
+        // Attach GTK signal handlers to the underlying webkit2gtk WebView widget.
+        // These fire reliably with real file paths on Linux XDnD drags.
+        let desktop = use_window();
+        let webkit_view: webkit2gtk::WebView = desktop.webview.webview();
+
+        // collect drop paths in shared state between data_received and drop signals
+        let pending: Arc<std::sync::Mutex<Option<Vec<PathBuf>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        {
+            let pending = Arc::clone(&pending);
+            webkit_view.connect_drag_data_received(move |_, _, _, _, data: &gtk::SelectionData, info: u32, _| {
+                if info == 2 {
+                    let paths: Vec<PathBuf> = data.uris()
+                        .iter()
+                        .map(|u| {
+                            let s = u.as_str();
+                            let s = s.strip_prefix("file://").unwrap_or(s);
+                            let decoded = percent_encoding::percent_decode_str(s)
+                                .decode_utf8_lossy()
+                                .to_string();
+                            PathBuf::from(decoded)
+                        })
+                        .collect();
+                    *pending.lock().unwrap() = Some(paths);
+                }
+            });
+        }
+
+        {
+            let pending = Arc::clone(&pending);
+            webkit_view.connect_drag_drop(move |_, _, _, _, _| {
+                if let Some(paths) = pending.lock().unwrap().take() {
+                    for path in paths {
+                        let _ = tx.send(path);
+                    }
+                }
+                // Return false so WebKit also processes the drop (avoids visual glitches)
+                false
+            });
+        }
+    });
+
+    // ── Global dragover visual indicator via JS ────────────────────────────────
+    use_effect(move || {
+        document::eval(r#"
+            (function() {
+                if (window.__bettertan_dragover_registered) return;
+                window.__bettertan_dragover_registered = true;
+                window.addEventListener('dragover', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }, true);
+            })();
+        "#);
+    });
 
     // ── Save to library ────────────────────────────────────────────────────────
     let save_entry = move |_| {
@@ -236,7 +317,7 @@ pub fn TaggerView() -> Element {
                     disabled: !can_run,
                     onclick: move |_| {
                         if let Some(p) = image_path.read().clone() {
-                            run_inference(p);
+                            run_inference.send(p);
                         }
                     },
                     "Run Tagger"
