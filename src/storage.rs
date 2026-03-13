@@ -136,7 +136,7 @@ impl LibraryEntry {
 
 /// Copy `src_image` into the data dir and write its `.idx` sidecar.
 ///
-/// Returns an error if a file with the same name already exists in the library.
+/// Overwrites the file if it already exists (e.g. when re-saving with updated tags).
 ///
 /// Returns the path of the image in the data dir.
 pub fn save_entry(
@@ -152,19 +152,32 @@ pub fn save_entry(
         .context("image path has no file name")?;
     let dest = dir.join(file_name);
 
-    if dest.exists() && src_image != dest {
-        anyhow::bail!(
-            "An image named '{}' already exists in the library.",
-            file_name.to_string_lossy()
-        );
-    }
-
     std::fs::copy(src_image, &dest)
         .with_context(|| format!("failed to copy image to {}", dest.display()))?;
 
     write_idx(&idx_path_for(&dest), model_tags, custom_tags, ocr_text)?;
 
     Ok(dest)
+}
+
+/// Check whether importing an image with this name would collide with an
+/// existing library entry.  Returns `Some(error_message)` on collision.
+pub fn check_import_duplicate(src_image: &Path) -> Option<String> {
+    let dir = data_dir();
+    let Some(file_name) = src_image.file_name() else { return None };
+    let dest = dir.join(file_name);
+    // If the source is already inside the data dir, it's not an import collision.
+    if src_image.starts_with(&dir) {
+        return None;
+    }
+    if dest.exists() {
+        Some(format!(
+            "An image named '{}' already exists in the library.",
+            file_name.to_string_lossy()
+        ))
+    } else {
+        None
+    }
 }
 
 /// Update the `.idx` sidecar for an image that is **already in the data dir**,

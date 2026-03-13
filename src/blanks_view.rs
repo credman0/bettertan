@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
@@ -60,6 +61,37 @@ fn search_blanks(entries: &[BlankEntry], query: &str) -> Vec<usize> {
         .collect()
 }
 
+// ── Favorites ────────────────────────────────────────────────────────────────
+
+fn favorites_path() -> PathBuf {
+    storage::data_dir().join("blank_favorites")
+}
+
+fn load_favorites() -> HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(favorites_path()) else {
+        return HashSet::new();
+    };
+    text.lines()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn save_favorites(favorites: &HashSet<String>) {
+    let mut ids: Vec<&str> = favorites.iter().map(|s| s.as_str()).collect();
+    ids.sort();
+    let _ = std::fs::write(favorites_path(), ids.join("\n"));
+}
+
+fn toggle_favorite(name: &str) -> HashSet<String> {
+    let mut favs = load_favorites();
+    if !favs.remove(name) {
+        favs.insert(name.to_owned());
+    }
+    save_favorites(&favs);
+    favs
+}
+
 // ── Generate image with bottom text ──────────────────────────────────────────
 
 fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow::Result<PathBuf> {
@@ -68,8 +100,8 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
 
     let img = image::open(image_path)
         .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", image_path.display()))?;
-    let mut canvas = img.to_rgba8();
-    let (img_w, img_h) = (canvas.width(), canvas.height());
+    let canvas = img.to_rgba8();
+    let img_w = canvas.width();
 
     if text.trim().is_empty() {
         anyhow::bail!("No text entered.");
@@ -78,17 +110,25 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
     let font = load_default_font()
         .ok_or_else(|| anyhow::anyhow!("Failed to load font"))?;
 
-    // Text box: full width, bottom 20% of image
-    let box_w = img_w;
-    let box_h = (img_h as f32 * 0.20).max(40.0) as u32;
-    let box_y = img_h.saturating_sub(box_h);
-
     let display_text = text.to_uppercase();
-    let (font_size, lines) = fit_text(&font, &display_text, box_w.saturating_sub(20), box_h);
+
+    // Use a fixed font size proportional to image width, then word-wrap and
+    // expand the text area downward as needed (instead of shrinking the font).
+    let font_size = (img_w as f32 * 0.07).clamp(20.0, 120.0);
     let scale = PxScale::from(font_size);
-    let line_h = font_size * 1.2;
-    let total_h = lines.len() as f32 * line_h;
-    let block_top = box_y as f32 + (box_h as f32 - total_h) / 2.0;
+    let line_h = font_size * 1.25;
+    let padding = 10u32;
+    let usable_w = img_w.saturating_sub(padding * 2);
+
+    let lines = word_wrap(&font, &display_text, scale, usable_w);
+    let total_h = lines.len() as f32 * line_h + padding as f32 * 2.0;
+
+    // Extend the canvas downward to fit the text block.
+    let new_h = canvas.height() + total_h as u32;
+    let mut extended = image::RgbaImage::from_pixel(img_w, new_h, image::Rgba([0, 0, 0, 255]));
+    image::imageops::overlay(&mut extended, &canvas, 0, 0);
+
+    let block_top = canvas.height() as f32 + padding as f32;
 
     let fg = image::Rgba([255, 255, 255, 255]);
     let stroke = image::Rgba([0, 0, 0, 255]);
@@ -102,11 +142,11 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
         for ox in -2i32..=2 {
             for oy in -2i32..=2 {
                 if ox != 0 || oy != 0 {
-                    draw_text_mut(&mut canvas, stroke, draw_x + ox, draw_y + oy, scale, &font, line);
+                    draw_text_mut(&mut extended, stroke, draw_x + ox, draw_y + oy, scale, &font, line);
                 }
             }
         }
-        draw_text_mut(&mut canvas, fg, draw_x, draw_y, scale, &font, line);
+        draw_text_mut(&mut extended, fg, draw_x, draw_y, scale, &font, line);
     }
 
     let dir = storage::data_dir();
@@ -117,13 +157,13 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
         .unwrap_or_default()
         .as_secs();
     let out = dir.join(format!("blank_{}_{}.png", stem, ts));
-    canvas.save(&out).map_err(|e| anyhow::anyhow!("cannot save: {e}"))?;
+    extended.save(&out).map_err(|e| anyhow::anyhow!("cannot save: {e}"))?;
 
     // Write a library .idx sidecar so it appears in the image library.
     let idx_path = storage::idx_path_for(&out);
     let _ = std::fs::write(
         &idx_path,
-        format!("# image tagger index v1\n[tags]\nmeme=1.0000\n[custom]\nblank\n"),
+        "# image tagger index v1\n[tags]\nmeme=1.0000\n[custom]\nblank\n",
     );
 
     Ok(out)
@@ -132,32 +172,6 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
 fn load_default_font() -> Option<ab_glyph::FontVec> {
     let bytes = google_fonts::league_gothic_regular_variable().ok()?;
     ab_glyph::FontVec::try_from_vec(bytes).ok()
-}
-
-fn fit_text(
-    font: &ab_glyph::FontVec,
-    text: &str,
-    box_w: u32,
-    box_h: u32,
-) -> (f32, Vec<String>) {
-    use ab_glyph::PxScale;
-    use imageproc::drawing::text_size;
-
-    let mut size = (box_h as f32 * 0.85).min(200.0).max(10.0);
-    loop {
-        let scale = PxScale::from(size);
-        let lines = word_wrap(font, text, scale, box_w);
-        let max_w = lines.iter()
-            .map(|l| text_size(scale, font, l).0)
-            .max()
-            .unwrap_or(0);
-        let total_h = lines.len() as f32 * size * 1.2;
-
-        if (max_w <= box_w && total_h <= box_h as f32) || size <= 10.0 {
-            return (size, lines);
-        }
-        size = (size * 0.92).max(10.0);
-    }
 }
 
 fn word_wrap(
@@ -202,6 +216,7 @@ fn word_wrap(
 pub fn BlanksView() -> Element {
     let mut blanks: Signal<Vec<BlankEntry>> = use_signal(load_blanks);
     let mut selected: Signal<Option<usize>> = use_signal(|| None);
+    let mut favorites: Signal<HashSet<String>> = use_signal(load_favorites);
     let mut query: Signal<String> = use_signal(String::new);
     let mut import_status: Signal<Option<Result<String, String>>> = use_signal(|| None);
 
@@ -240,17 +255,39 @@ pub fn BlanksView() -> Element {
     };
 
     let all_blanks = blanks.read().clone();
+    let fav_set = favorites.read().clone();
     let query_str = query.read().clone();
-    let visible = search_blanks(&all_blanks, &query_str);
+    let searching = !query_str.trim().is_empty();
+    let sorted_indices = search_blanks(&all_blanks, &query_str);
+
+    let fav_blanks: Vec<(usize, BlankEntry)> = if !searching {
+        sorted_indices.iter()
+            .filter(|&&i| fav_set.contains(&all_blanks[i].file_name))
+            .map(|&i| (i, all_blanks[i].clone()))
+            .collect()
+    } else {
+        vec![]
+    };
+    let rest_blanks: Vec<(usize, BlankEntry)> = if !searching {
+        sorted_indices.iter()
+            .filter(|&&i| !fav_set.contains(&all_blanks[i].file_name))
+            .map(|&i| (i, all_blanks[i].clone()))
+            .collect()
+    } else {
+        sorted_indices.iter()
+            .map(|&i| (i, all_blanks[i].clone()))
+            .collect()
+    };
+
     let selected_idx = selected.read().clone();
     let count = all_blanks.len();
-    let vis_count = visible.len();
-    let searching = !query_str.trim().is_empty();
+    let vis_count = sorted_indices.len();
     let count_label = if searching {
         format!("{} / {} blank{}", vis_count, count, if count == 1 { "" } else { "s" })
     } else {
         format!("{} blank{}", count, if count == 1 { "" } else { "s" })
     };
+    let has_favs = !fav_blanks.is_empty();
 
     let selected_blank: Option<BlankEntry> = selected_idx
         .and_then(|i| all_blanks.get(i).cloned());
@@ -337,24 +374,89 @@ pub fn BlanksView() -> Element {
                     style: "flex:1; overflow-y:auto; padding:20px;",
                     if all_blanks.is_empty() {
                         EmptyBlanks {}
-                    } else if visible.is_empty() {
-                        div {
-                            style: "font-size:11px; color:#2e2e3a; text-align:center; padding-top:40px; letter-spacing:0.08em;",
-                            "No matching blanks"
+                    } else if searching {
+                        if rest_blanks.is_empty() {
+                            div {
+                                style: "font-size:11px; color:#2e2e3a; text-align:center; padding-top:40px; letter-spacing:0.08em;",
+                                "No matching blanks"
+                            }
+                        } else {
+                            div {
+                                style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px;",
+                                for (orig_i, entry) in rest_blanks.iter() {
+                                    BlankCard {
+                                        key: "{orig_i}",
+                                        entry: entry.clone(),
+                                        selected: selected_idx == Some(*orig_i),
+                                        favorited: fav_set.contains(&entry.file_name),
+                                        onclick: {
+                                            let oi = *orig_i;
+                                            move |_| {
+                                                let new = if *selected.read() == Some(oi) { None } else { Some(oi) };
+                                                selected.set(new);
+                                            }
+                                        },
+                                        on_toggle_favorite: {
+                                            let name = entry.file_name.clone();
+                                            move |_| { favorites.set(toggle_favorite(&name)); }
+                                        },
+                                    }
+                                }
+                            }
                         }
                     } else {
+                        // Favorites section
+                        if has_favs {
+                            div {
+                                style: "font-size:10px; color:#7a6a30; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px;",
+                                "★  Favorites"
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px; margin-bottom:24px;",
+                                for (orig_i, entry) in fav_blanks.iter() {
+                                    BlankCard {
+                                        key: "fav-{orig_i}",
+                                        entry: entry.clone(),
+                                        selected: selected_idx == Some(*orig_i),
+                                        favorited: true,
+                                        onclick: {
+                                            let oi = *orig_i;
+                                            move |_| {
+                                                let new = if *selected.read() == Some(oi) { None } else { Some(oi) };
+                                                selected.set(new);
+                                            }
+                                        },
+                                        on_toggle_favorite: {
+                                            let name = entry.file_name.clone();
+                                            move |_| { favorites.set(toggle_favorite(&name)); }
+                                        },
+                                    }
+                                }
+                            }
+                            div {
+                                style: "font-size:10px; color:#3a3a50; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px;",
+                                "All Blanks"
+                            }
+                        }
+                        // Non-favorite blanks
                         div {
                             style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px;",
-                            for &orig_i in visible.iter() {
+                            for (orig_i, entry) in rest_blanks.iter() {
                                 BlankCard {
                                     key: "{orig_i}",
-                                    entry: all_blanks[orig_i].clone(),
-                                    selected: selected_idx == Some(orig_i),
+                                    entry: entry.clone(),
+                                    selected: selected_idx == Some(*orig_i),
+                                    favorited: false,
                                     onclick: {
+                                        let oi = *orig_i;
                                         move |_| {
-                                            let new = if *selected.read() == Some(orig_i) { None } else { Some(orig_i) };
+                                            let new = if *selected.read() == Some(oi) { None } else { Some(oi) };
                                             selected.set(new);
                                         }
+                                    },
+                                    on_toggle_favorite: {
+                                        let name = entry.file_name.clone();
+                                        move |_| { favorites.set(toggle_favorite(&name)); }
                                     },
                                 }
                             }
@@ -368,6 +470,7 @@ pub fn BlanksView() -> Element {
                 BlankEditor {
                     key: "{entry.file_name}",
                     entry,
+                    favorites,
                 }
             }
         }
@@ -381,7 +484,9 @@ pub fn BlanksView() -> Element {
 fn BlankCard(
     entry: BlankEntry,
     selected: bool,
+    favorited: bool,
     onclick: EventHandler<MouseEvent>,
+    on_toggle_favorite: EventHandler<MouseEvent>,
 ) -> Element {
     let thumb_path = entry.image_path.clone();
     let thumb_res = use_resource(move || {
@@ -396,14 +501,16 @@ fn BlankCard(
     let data_url: Option<String> = thumb_res.read().as_ref().and_then(|v| v.clone());
     let name = entry.file_name.clone();
     let border = if selected { "#5b8dee" } else { "#1e1e26" };
+    let star = if favorited { "★" } else { "☆" };
+    let star_color = if favorited { "#f0c040" } else { "#3a3a50" };
 
     rsx! {
         div {
-            style: "background:#13131a; border:1px solid {border}; border-radius:6px; overflow:hidden; cursor:pointer; transition:border-color 0.15s;",
+            style: "background:#13131a; border:1px solid {border}; border-radius:6px; overflow:hidden; cursor:pointer; transition:border-color 0.15s; position:relative;",
             onclick: move |e| onclick.call(e),
 
             div {
-                style: "width:100%; aspect-ratio:1/1; overflow:hidden; background:#0c0c0e;",
+                style: "width:100%; aspect-ratio:1/1; overflow:hidden; background:#0c0c0e; position:relative;",
                 if let Some(src) = data_url {
                     img { src: "{src}", style: "width:100%; height:100%; object-fit:cover; display:block;" }
                 } else {
@@ -411,6 +518,15 @@ fn BlankCard(
                         style: "width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#2e2e3a; font-size:10px;",
                         "no preview"
                     }
+                }
+                // Star button overlaid on image
+                div {
+                    style: "position:absolute; top:5px; right:5px; cursor:pointer; font-size:13px; color:{star_color}; padding:2px 5px; background:rgba(0,0,0,0.6); border-radius:3px; line-height:1;",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        on_toggle_favorite.call(e);
+                    },
+                    "{star}"
                 }
             }
 
@@ -429,12 +545,15 @@ fn BlankCard(
 
 #[component]
 #[allow(non_snake_case)]
-fn BlankEditor(entry: BlankEntry) -> Element {
+fn BlankEditor(entry: BlankEntry, favorites: Signal<HashSet<String>>) -> Element {
     let mut text: Signal<String> = use_signal(String::new);
     let mut generating: Signal<bool> = use_signal(|| false);
     let mut result: Signal<Option<Result<PathBuf, String>>> = use_signal(|| None);
 
     let name = entry.file_name.clone();
+    let id = entry.file_name.clone();
+
+    let favorited = favorites.read().contains(&id);
 
     // Load the base image asynchronously.
     let img_path = entry.image_path.clone();
@@ -474,6 +593,10 @@ fn BlankEditor(entry: BlankEntry) -> Element {
     let btn_label = if *generating.read() { "Generating…" } else { "Generate" };
     let btn_opacity = if btn_disabled { "0.5" } else { "1" };
 
+    let fav_label = if favorited { "★" } else { "☆" };
+    let fav_color = if favorited { "#f0c040" } else { "#555" };
+    let fav_border = if favorited { "#8a7030" } else { "#2a2a38" };
+
     let library_dir = storage::data_dir();
 
     rsx! {
@@ -488,12 +611,23 @@ fn BlankEditor(entry: BlankEntry) -> Element {
                 }
             }
 
-            // File name
+            // File name + favorite
             div {
-                style: "padding:11px 14px; border-bottom:1px solid #1a1a22; flex-shrink:0;",
+                style: "padding:11px 14px; border-bottom:1px solid #1a1a22; flex-shrink:0; display:flex; align-items:center; gap:8px;",
                 div {
-                    style: "font-size:12px; color:#ddd; word-break:break-all;",
-                    "{name}"
+                    style: "flex:1; min-width:0;",
+                    div {
+                        style: "font-size:12px; color:#ddd; word-break:break-all;",
+                        "{name}"
+                    }
+                }
+                button {
+                    style: "flex-shrink:0; padding:3px 8px; background:transparent; border:1px solid {fav_border}; border-radius:4px; color:{fav_color}; font-size:15px; cursor:pointer; line-height:1;",
+                    onclick: {
+                        let id = id.clone();
+                        move |_| { favorites.set(toggle_favorite(&id)); }
+                    },
+                    "{fav_label}"
                 }
             }
 

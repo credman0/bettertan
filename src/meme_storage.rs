@@ -443,7 +443,7 @@ fn parse_color(s: &str) -> image::Rgba<u8> {
 /// | he/notosanshebrew| Noto Sans Hebrew  | Noto Sans Hebrew             |
 fn load_font(id_or_alias: &str) -> Option<ab_glyph::FontVec> {
     let bytes: Vec<u8> = match id_or_alias.to_lowercase().as_str() {
-        "thick" | "titilliumweb"     => google_fonts::league_spartan_variable(),
+        "thick" | "titilliumweb"     => google_fonts::league_gothic_regular_variable(),
         "impact"                      => google_fonts::league_gothic_regular_variable(),
         "comic" | "kalam"             => google_fonts::caveat_variable(),
         "notosans"                    => google_fonts::noto_sans_variable(),

@@ -147,6 +147,10 @@ pub fn TaggerView() -> Element {
             .add_filter("Images", &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"])
             .pick_file()
         {
+            if let Some(msg) = storage::check_import_duplicate(&path) {
+                save_status.set(Some(Err(msg)));
+                return;
+            }
             image_src.set(image_to_data_url(&path));
             let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
             image_path.set(Some(path.clone()));
@@ -172,6 +176,10 @@ pub fn TaggerView() -> Element {
                     .unwrap_or("")
                     .to_lowercase();
                 if image_exts.contains(&ext.as_str()) {
+                    if let Some(msg) = storage::check_import_duplicate(&path) {
+                        save_status.set(Some(Err(msg)));
+                        continue;
+                    }
                     image_src.set(image_to_data_url(&path));
                     let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
                     image_path.set(Some(path.clone()));
