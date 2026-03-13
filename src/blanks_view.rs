@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 
@@ -81,6 +81,18 @@ fn save_favorites(favorites: &HashSet<String>) {
     let mut ids: Vec<&str> = favorites.iter().map(|s| s.as_str()).collect();
     ids.sort();
     let _ = std::fs::write(favorites_path(), ids.join("\n"));
+}
+
+/// Copy an image file into the blanks directory, creating it if needed.
+/// Returns the destination path. Overwrites any existing file with the same name.
+pub fn copy_to_blanks(src: &Path) -> anyhow::Result<PathBuf> {
+    let dir = ensure_blanks_dir()?;
+    let fname = src
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("source path has no filename"))?;
+    let dest = dir.join(fname);
+    std::fs::copy(src, &dest)?;
+    Ok(dest)
 }
 
 fn toggle_favorite(name: &str) -> HashSet<String> {
@@ -216,6 +228,19 @@ pub fn BlanksView() -> Element {
     let mut favorites: Signal<HashSet<String>> = use_signal(load_favorites);
     let mut query: Signal<String> = use_signal(String::new);
     let mut import_status: Signal<Option<Result<String, String>>> = use_signal(|| None);
+
+    // Consume a pending blank path set by "Copy to Blanks" in library view.
+    let mut pending_blank = use_context::<Signal<Option<PathBuf>>>();
+    use_effect(move || {
+        let maybe = pending_blank.read().clone();
+        if let Some(path) = maybe {
+            let idx = blanks.read().iter().position(|e| e.image_path == path);
+            if let Some(i) = idx {
+                selected.set(Some(i));
+            }
+            pending_blank.set(None);
+        }
+    });
 
     let refresh = move |_| {
         blanks.set(load_blanks());

@@ -75,6 +75,9 @@ fn App() -> Element {
     let _pending: Signal<Option<PathBuf>> =
         use_context_provider(|| Signal::new(storage::load_ui_state().tagger_image));
 
+    let _pending_blank: Signal<Option<PathBuf>> =
+        use_context_provider(|| Signal::new(None));
+
     let mut show_settings = use_signal(|| false);
     let mut data_dir_display: Signal<String> = use_signal(|| {
         storage::get_data_dir_setting().to_string_lossy().to_string()

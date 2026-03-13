@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use crate::{image_to_data_url, search, storage::{self, LibraryEntry, update_ui_state}, Tab};
+use crate::{blanks_view, image_to_data_url, search, storage::{self, LibraryEntry, update_ui_state}, Tab};
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -25,10 +25,15 @@ pub fn LibraryView() -> Element {
     };
 
     // Compute visible indices (search-sorted or original order).
-    let visible_indices: Vec<usize> = {
+    // Pair each index with a stable path key to avoid thumbnail cache mismatches
+    // when entries are deleted/reordered.
+    let visible_indices: Vec<(usize, String)> = {
         let q = query.read().clone();
         let all = entries.read();
         search::search_library(&all, &q)
+            .into_iter()
+            .map(|i| (i, all[i].image_path.to_string_lossy().to_string()))
+            .collect()
     };
     let visible_count = visible_indices.len();
 
@@ -74,9 +79,9 @@ pub fn LibraryView() -> Element {
                     } else {
                         div {
                             style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px;",
-                            for (_, orig_i) in visible_indices.iter().copied().enumerate() {
+                            for (orig_i, path_key) in visible_indices.iter().cloned() {
                                 LibraryCard {
-                                    key: "{orig_i}",
+                                    key: "{path_key}",
                                     entry: entries.read()[orig_i].clone(),
                                     selected: *selected.read() == Some(orig_i),
                                     onclick: move |_| {
@@ -172,6 +177,7 @@ fn LibraryCard(
 #[allow(non_snake_case)]
 fn DetailPanel(entry: LibraryEntry, on_delete: EventHandler<MouseEvent>) -> Element {
     let mut pending_image = use_context::<Signal<Option<PathBuf>>>();
+    let mut pending_blank = use_context::<Signal<Option<PathBuf>>>();
     let mut active_tab    = use_context::<Signal<Tab>>();
 
     let data_url  = image_to_data_url(&entry.image_path);
@@ -182,7 +188,8 @@ fn DetailPanel(entry: LibraryEntry, on_delete: EventHandler<MouseEvent>) -> Elem
     let custom_csv: String = entry.custom_tags.join(", ");
     let model_csv: String  = entry.tags.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(", ");
 
-    let open_path = entry.image_path.clone();
+    let open_path  = entry.image_path.clone();
+    let copy_path  = entry.image_path.clone();
 
     rsx! {
         div {
@@ -204,12 +211,25 @@ fn DetailPanel(entry: LibraryEntry, on_delete: EventHandler<MouseEvent>) -> Elem
                 div { style: "font-size:10px; color:#2a2a3a; letter-spacing:0.03em; word-break:break-all; margin-bottom:10px;", "{path_str}" }
 
                 button {
-                    style: "width:100%; padding:7px 0; background:#1e1e30; color:#9b8dd4; border:1px solid #2e2e46; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer;",
+                    style: "width:100%; padding:7px 0; background:#1e1e30; color:#9b8dd4; border:1px solid #2e2e46; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer; margin-bottom:6px;",
                     onclick: move |_| {
                         pending_image.set(Some(open_path.clone()));
                         *active_tab.write() = Tab::Tagger;
                     },
                     "Open in Tagger"
+                }
+                button {
+                    style: "width:100%; padding:7px 0; background:#1e2a1e; color:#7ecba1; border:1px solid #2e462e; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer;",
+                    onclick: move |_| {
+                        match blanks_view::copy_to_blanks(&copy_path) {
+                            Ok(dest) => {
+                                pending_blank.set(Some(dest));
+                                *active_tab.write() = Tab::Blanks;
+                            }
+                            Err(e) => eprintln!("Copy to blanks failed: {e}"),
+                        }
+                    },
+                    "Copy to Blanks"
                 }
             }
 
