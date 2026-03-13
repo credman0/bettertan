@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod blanks_view;
 mod library_view;
 mod meme_storage;
 mod meme_view;
@@ -52,6 +53,7 @@ pub enum Tab {
     Tagger,
     Library,
     Meme,
+    Blanks,
 }
 
 // ── Root component ────────────────────────────────────────────────────────────
@@ -65,12 +67,18 @@ fn App() -> Element {
         Signal::new(match tab.as_str() {
             "library" => Tab::Library,
             "meme"    => Tab::Meme,
+            "blanks"  => Tab::Blanks,
             _         => Tab::Tagger,
         })
     });
 
     let _pending: Signal<Option<PathBuf>> =
         use_context_provider(|| Signal::new(storage::load_ui_state().tagger_image));
+
+    let mut show_settings = use_signal(|| false);
+    let mut data_dir_display: Signal<String> = use_signal(|| {
+        storage::get_data_dir_setting().to_string_lossy().to_string()
+    });
 
     rsx! {
         div {
@@ -115,6 +123,77 @@ fn App() -> Element {
                         let _ = storage::update_ui_state(|s| s.active_tab = "meme".into());
                     },
                 }
+                NavTab {
+                    label: "Blanks",
+                    active: *active_tab.read() == Tab::Blanks,
+                    onclick: move |_| {
+                        *active_tab.write() = Tab::Blanks;
+                        let _ = storage::update_ui_state(|s| s.active_tab = "blanks".into());
+                    },
+                }
+
+                // Spacer
+                div { style: "flex:1;" }
+
+                // Settings gear button
+                div {
+                    style: "display:flex; align-items:center; position:relative;",
+                    button {
+                        style: "background:none; border:none; color:#555; font-size:16px; cursor:pointer; padding:4px 8px;",
+                        onclick: move |_| {
+                            let cur = *show_settings.read();
+                            show_settings.set(!cur);
+                        },
+                        "⚙"
+                    }
+
+                    if *show_settings.read() {
+                        div {
+                            style: "position:absolute; top:40px; right:0; background:#1a1a26; border:1px solid #2a2a38; border-radius:6px; padding:16px; min-width:340px; z-index:100; box-shadow:0 4px 16px rgba(0,0,0,0.5);",
+                            onclick: move |e| e.stop_propagation(),
+
+                            div {
+                                style: "font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:#555; margin-bottom:10px;",
+                                "Settings"
+                            }
+
+                            div {
+                                style: "font-size:11px; color:#888; margin-bottom:6px;",
+                                "Data Directory"
+                            }
+                            div {
+                                style: "font-size:10px; color:#555; word-break:break-all; margin-bottom:8px; line-height:1.5;",
+                                "{data_dir_display}"
+                            }
+                            button {
+                                style: "padding:6px 14px; background:#1e1e30; color:#9b8dd4; border:1px solid #2e2e46; border-radius:4px; font-family:inherit; font-size:11px; letter-spacing:0.08em; cursor:pointer;",
+                                onclick: move |_| {
+                                    if let Some(dir) = rfd::FileDialog::new()
+                                        .set_directory(storage::get_data_dir_setting())
+                                        .pick_folder()
+                                    {
+                                        if let Ok(()) = storage::set_data_dir(&dir) {
+                                            data_dir_display.set(dir.to_string_lossy().to_string());
+                                        }
+                                    }
+                                },
+                                "Choose Folder…"
+                            }
+                            div {
+                                style: "font-size:10px; color:#3a3a50; margin-top:8px; line-height:1.5;",
+                                "Restart the app after changing for full effect."
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Click-away to close settings dropdown
+            if *show_settings.read() {
+                div {
+                    style: "position:fixed; top:0; left:0; right:0; bottom:0; z-index:99;",
+                    onclick: move |_| show_settings.set(false),
+                }
             }
 
             // ── Content ───────────────────────────────────────────────────────
@@ -124,6 +203,7 @@ fn App() -> Element {
                     Tab::Tagger  => rsx! { tagger_view::TaggerView {} },
                     Tab::Library => rsx! { library_view::LibraryView {} },
                     Tab::Meme    => rsx! { meme_view::MemeView {} },
+                    Tab::Blanks  => rsx! { blanks_view::BlanksView {} },
                 } }
             }
         }

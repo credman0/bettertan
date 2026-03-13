@@ -496,6 +496,35 @@ pub fn TaggerView() -> Element {
                                 Err(msg) => rsx! { div { style: "margin-top:7px; font-size:11px; color:#c0392b;", "✗  {msg}" } },
                             }
                         }
+
+                        // Popup overlay for duplicate-name errors
+                        if let Some(err_msg) = &*save_status.read() {
+                            if let Err(msg) = err_msg {
+                                if msg.contains("already exists") {
+                                    div {
+                                        style: "position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:1000;",
+                                        onclick: move |_| save_status.set(None),
+                                        div {
+                                            style: "background:#1a1a26; border:1px solid #c0392b; border-radius:8px; padding:24px 32px; max-width:420px; text-align:center;",
+                                            onclick: move |e| e.stop_propagation(),
+                                            div {
+                                                style: "font-size:14px; color:#e74c3c; margin-bottom:12px; font-weight:bold;",
+                                                "Duplicate Image"
+                                            }
+                                            div {
+                                                style: "font-size:12px; color:#ccc; line-height:1.6; margin-bottom:16px;",
+                                                "{msg}"
+                                            }
+                                            button {
+                                                style: "padding:7px 24px; background:#c0392b; color:#fff; border:none; border-radius:4px; font-family:inherit; font-size:11px; cursor:pointer;",
+                                                onclick: move |_| save_status.set(None),
+                                                "OK"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

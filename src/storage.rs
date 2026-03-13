@@ -1,15 +1,83 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 
-// ── Data directory ────────────────────────────────────────────────────────────
+// ── App settings (cross-platform config location) ────────────────────────────
 
-/// Returns `~/.image_tagger/` (cross-platform via HOME / USERPROFILE).
-pub fn data_dir() -> PathBuf {
+/// Returns the directory for app-level settings (not user data).
+/// Linux:   ~/.config/bettertan/
+/// macOS:   ~/Library/Application Support/bettertan/
+/// Windows: %APPDATA%\bettertan\
+fn settings_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".config")
+        })
+        .join("bettertan")
+}
+
+fn settings_path() -> PathBuf {
+    settings_dir().join("settings")
+}
+
+/// Read the configured data directory from the settings file, or return the default.
+fn read_configured_data_dir() -> PathBuf {
+    if let Ok(text) = std::fs::read_to_string(settings_path()) {
+        for line in text.lines() {
+            if let Some(val) = line.strip_prefix("data_dir=") {
+                let val = val.trim();
+                if !val.is_empty() {
+                    return PathBuf::from(val);
+                }
+            }
+        }
+    }
+    default_data_dir()
+}
+
+fn default_data_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".image_tagger")
+}
+
+/// Save the data directory path to the settings file.
+pub fn set_data_dir(path: &Path) -> Result<()> {
+    let dir = settings_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create settings dir: {}", dir.display()))?;
+    let content = format!("data_dir={}\n", path.display());
+    std::fs::write(settings_path(), content)
+        .with_context(|| "failed to write settings")?;
+    // Update the cached value
+    *DATA_DIR.lock().unwrap() = Some(path.to_path_buf());
+    Ok(())
+}
+
+/// Return the current configured data dir path (for display in UI).
+pub fn get_data_dir_setting() -> PathBuf {
+    read_configured_data_dir()
+}
+
+// Cached data directory — initialized once from settings, updated when changed.
+static DATA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+// ── Data directory ────────────────────────────────────────────────────────────
+
+/// Returns the active data directory (configurable via settings).
+pub fn data_dir() -> PathBuf {
+    let mut guard = DATA_DIR.lock().unwrap();
+    if let Some(ref p) = *guard {
+        return p.clone();
+    }
+    let dir = read_configured_data_dir();
+    *guard = Some(dir.clone());
+    dir
 }
 
 fn ensure_data_dir() -> Result<PathBuf> {
@@ -68,8 +136,7 @@ impl LibraryEntry {
 
 /// Copy `src_image` into the data dir and write its `.idx` sidecar.
 ///
-/// If a file with the same name already exists, the image is renamed with a
-/// numeric suffix (the idx always matches the image that was actually stored).
+/// Returns an error if a file with the same name already exists in the library.
 ///
 /// Returns the path of the image in the data dir.
 pub fn save_entry(
@@ -83,7 +150,14 @@ pub fn save_entry(
     let file_name = src_image
         .file_name()
         .context("image path has no file name")?;
-    let dest = dedup_path(&dir.join(file_name));
+    let dest = dir.join(file_name);
+
+    if dest.exists() && src_image != dest {
+        anyhow::bail!(
+            "An image named '{}' already exists in the library.",
+            file_name.to_string_lossy()
+        );
+    }
 
     std::fs::copy(src_image, &dest)
         .with_context(|| format!("failed to copy image to {}", dest.display()))?;
@@ -302,33 +376,3 @@ pub fn update_ui_state(f: impl FnOnce(&mut UiState)) -> Result<()> {
     save_ui_state(&state)
 }
 
-// ── Path deduplication ────────────────────────────────────────────────────────
-
-/// Returns `path` unchanged if it doesn't exist; otherwise appends `_1`, `_2`, …
-fn dedup_path(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
-    }
-    let stem = path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let dir = path.parent().unwrap_or(Path::new("."));
-    for i in 1u32.. {
-        let name = if ext.is_empty() {
-            format!("{}_{}", stem, i)
-        } else {
-            format!("{}_{}.{}", stem, i, ext)
-        };
-        let candidate = dir.join(name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!()
-}

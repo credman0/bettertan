@@ -26,3 +26,4 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9"
 tantivy = "0.25.0"
 tokio = "1.50.0"
+dirs = "6"
