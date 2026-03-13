@@ -59,12 +59,16 @@ fn App() -> Element {
     let _ocr    = use_context_provider(init_ocr);
 
     // Active tab — readable/writable by any descendant.
-    let mut active_tab: Signal<Tab> = use_context_provider(|| Signal::new(Tab::Tagger));
+    let mut active_tab: Signal<Tab> = use_context_provider(|| {
+        let tab = storage::load_ui_state().active_tab;
+        Signal::new(if tab == "library" { Tab::Library } else { Tab::Tagger })
+    });
 
     // Library sets this to a path; TaggerView picks it up, loads the image,
     // but does NOT auto-run inference. Cleared after consumption.
+    // Initialised from saved state so the tagger restores its last image.
     let _pending: Signal<Option<PathBuf>> =
-        use_context_provider(|| Signal::new(Option::<PathBuf>::None));
+        use_context_provider(|| Signal::new(storage::load_ui_state().tagger_image));
 
     rsx! {
         div {
@@ -84,12 +88,18 @@ fn App() -> Element {
                 NavTab {
                     label: "Tagger",
                     active: *active_tab.read() == Tab::Tagger,
-                    onclick: move |_| { *active_tab.write() = Tab::Tagger; },
+                    onclick: move |_| {
+                        *active_tab.write() = Tab::Tagger;
+                        let _ = storage::update_ui_state(|s| s.active_tab = "tagger".into());
+                    },
                 }
                 NavTab {
                     label: "Library",
                     active: *active_tab.read() == Tab::Library,
-                    onclick: move |_| { *active_tab.write() = Tab::Library; },
+                    onclick: move |_| {
+                        *active_tab.write() = Tab::Library;
+                        let _ = storage::update_ui_state(|s| s.active_tab = "library".into());
+                    },
                 }
             }
 

@@ -42,6 +42,7 @@ pub fn TaggerView() -> Element {
         let maybe = pending_image.read().clone();
         if let Some(path) = maybe {
             image_src.set(image_to_data_url(&path));
+            let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
             tag_input.set(String::new());
             save_status.set(None);
 
@@ -150,6 +151,7 @@ pub fn TaggerView() -> Element {
             .pick_file()
         {
             image_src.set(image_to_data_url(&path));
+            let _ = storage::update_ui_state(|s| s.tagger_image = Some(path.clone()));
             image_path.set(Some(path));
             raw_output.set(None);
             ocr_text.set(None);
@@ -174,7 +176,7 @@ pub fn TaggerView() -> Element {
         let custom: Vec<String> = custom_tags.read().clone();
         let ocr: Option<String> = ocr_text.read().clone();
 
-        match storage::save_entry(&path, &model_tags, &custom, ocr.as_deref()) {
+        match storage::save_or_update_entry(&path, &model_tags, &custom, ocr.as_deref()) {
             Ok(dest) => save_status.set(Some(Ok(format!("Saved → {}", dest.display())))),
             Err(e)   => save_status.set(Some(Err(e.to_string()))),
         }

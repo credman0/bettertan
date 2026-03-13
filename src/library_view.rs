@@ -2,18 +2,25 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use crate::{image_to_data_url, storage::{self, LibraryEntry}, Tab};
+use crate::{image_to_data_url, storage::{self, LibraryEntry, update_ui_state}, Tab};
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 #[allow(non_snake_case)]
 pub fn LibraryView() -> Element {
-    let mut entries: Signal<Vec<LibraryEntry>> = use_signal(|| storage::load_all_entries());
-    let mut selected: Signal<Option<usize>>    = use_signal(|| None);
+    let restore_path = storage::load_ui_state().library_selected;
+    let initial_entries = storage::load_all_entries();
+    let restore_idx = restore_path
+        .as_ref()
+        .and_then(|p| initial_entries.iter().position(|e| &e.image_path == p));
+
+    let mut entries: Signal<Vec<LibraryEntry>> = use_signal(|| initial_entries);
+    let mut selected: Signal<Option<usize>>    = use_signal(|| restore_idx);
 
     let refresh = move |_| {
         entries.set(storage::load_all_entries());
         selected.set(None);
+        let _ = update_ui_state(|s| s.library_selected = None);
     };
 
     rsx! {
@@ -54,7 +61,10 @@ pub fn LibraryView() -> Element {
                                     entry: entry.clone(),
                                     selected: *selected.read() == Some(i),
                                     onclick: move |_| {
-                                        selected.set(if *selected.read() == Some(i) { None } else { Some(i) });
+                                        let new_sel = if *selected.read() == Some(i) { None } else { Some(i) };
+                                        selected.set(new_sel);
+                                        let path = new_sel.and_then(|i| entries.read().get(i).map(|e| e.image_path.clone()));
+                                        let _ = update_ui_state(|s| s.library_selected = path);
                                     },
                                 }
                             }

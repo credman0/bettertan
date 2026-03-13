@@ -247,6 +247,58 @@ fn parse_idx(image_path: &Path, idx_path: &Path) -> Result<LibraryEntry> {
     })
 }
 
+// ── UI state persistence ──────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct UiState {
+    pub active_tab: String,
+    pub tagger_image: Option<PathBuf>,
+    pub library_selected: Option<PathBuf>,
+}
+
+pub fn load_ui_state() -> UiState {
+    let path = data_dir().join("ui_state");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return UiState::default();
+    };
+    let mut state = UiState::default();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k {
+            "tab"               => state.active_tab = v.to_string(),
+            "tagger_image"      => state.tagger_image = Some(PathBuf::from(v)),
+            "library_selected"  => state.library_selected = Some(PathBuf::from(v)),
+            _                   => {}
+        }
+    }
+    state
+}
+
+pub fn save_ui_state(state: &UiState) -> Result<()> {
+    let dir = ensure_data_dir()?;
+    let mut out = String::new();
+    if !state.active_tab.is_empty() {
+        out.push_str(&format!("tab={}\n", state.active_tab));
+    }
+    if let Some(p) = &state.tagger_image {
+        out.push_str(&format!("tagger_image={}\n", p.display()));
+    }
+    if let Some(p) = &state.library_selected {
+        out.push_str(&format!("library_selected={}\n", p.display()));
+    }
+    std::fs::write(dir.join("ui_state"), out)
+        .with_context(|| "failed to write ui_state")
+}
+
+/// Load, apply `f`, save. All UI state writes go through here.
+pub fn update_ui_state(f: impl FnOnce(&mut UiState)) -> Result<()> {
+    let mut state = load_ui_state();
+    f(&mut state);
+    save_ui_state(&state)
+}
+
+// ── Path deduplication ────────────────────────────────────────────────────────
+
 /// Returns `path` unchanged if it doesn't exist; otherwise appends `_1`, `_2`, …
 fn dedup_path(path: &Path) -> PathBuf {
     if !path.exists() {
