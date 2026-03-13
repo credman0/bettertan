@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -185,8 +185,6 @@ pub fn generate_meme(template: &MemeTemplate, texts: &[String]) -> Result<PathBu
     let mut canvas = img.to_rgba8();
     let (img_w, img_h) = (canvas.width(), canvas.height());
 
-    let font_loader = FontLoader::new(&template.image_path);
-
     for (i, region) in template.config.text.iter().enumerate() {
         let raw = texts.get(i).map(|s| s.as_str()).unwrap_or("").trim();
         if raw.is_empty() {
@@ -203,7 +201,7 @@ pub fn generate_meme(template: &MemeTemplate, texts: &[String]) -> Result<PathBu
         let box_w = (region.scale_x.clamp(0.0, 1.0) * img_w as f32).max(1.0) as u32;
         let box_h = (region.scale_y.clamp(0.0, 1.0) * img_h as f32).max(1.0) as u32;
 
-        let font = match font_loader.get(&region.font) {
+        let font = match load_font(&region.font) {
             Some(f) => f,
             None => {
                 eprintln!("No font found for '{}'; skipping region {i}", region.font);
@@ -253,6 +251,17 @@ pub fn generate_meme(template: &MemeTemplate, texts: &[String]) -> Result<PathBu
         .as_secs();
     let out = dir.join(format!("{}_{}.png", template.id, ts));
     canvas.save(&out).context("cannot save meme")?;
+
+    // Write a library .idx sidecar so this meme appears in the image library.
+    let idx_path = crate::storage::idx_path_for(&out);
+    let _ = std::fs::write(
+        &idx_path,
+        format!(
+            "# image tagger index v1\n[tags]\nmeme=1.0000\n[custom]\n{}\n",
+            template.id
+        ),
+    );
+
     Ok(out)
 }
 
@@ -416,102 +425,64 @@ fn parse_color(s: &str) -> image::Rgba<u8> {
 
 // ── Font loading ──────────────────────────────────────────────────────────────
 
-struct FontLoader {
-    search_dirs: Vec<PathBuf>,
+/// Returns an [`ab_glyph::FontVec`] for the given memegen font id or alias.
+///
+/// All fonts are fetched via the `google-fonts` crate (variable feature),
+/// which downloads each font once and caches it locally. Substitutes are
+/// chosen to be the closest available variable font for each alias:
+///
+/// | alias            | original          | variable substitute          |
+/// |------------------|-------------------|------------------------------|
+/// | thick/titillium  | Titillium Black   | League Spartan (heavy cond.) |
+/// | impact           | Impact            | League Gothic (condensed)    |
+/// | comic/kalam      | Kalam             | Caveat (handwriting)         |
+/// | notosans         | Noto Sans         | Noto Sans                    |
+/// | thin             | Titillium SemiBold| Josefin Sans (thin)          |
+/// | tiny/segoe       | Segoe UI          | Arimo (metric-compat.)       |
+/// | jp/hgminchob     | HG Mincho         | Noto Sans JP                 |
+/// | he/notosanshebrew| Noto Sans Hebrew  | Noto Sans Hebrew             |
+fn load_font(id_or_alias: &str) -> Option<ab_glyph::FontVec> {
+    let bytes: Vec<u8> = match id_or_alias.to_lowercase().as_str() {
+        "thick" | "titilliumweb"     => google_fonts::league_spartan_variable(),
+        "impact"                      => google_fonts::league_gothic_regular_variable(),
+        "comic" | "kalam"             => google_fonts::caveat_variable(),
+        "notosans"                    => google_fonts::noto_sans_variable(),
+        "thin" | "titilliumweb-thin" => google_fonts::josefin_sans_variable(),
+        "tiny" | "segoe"              => google_fonts::arimo_variable(),
+        "jp" | "hgminchob"           => google_fonts::noto_sans_jp_variable(),
+        "he" | "notosanshebrew"      => google_fonts::noto_sans_hebrew_variable(),
+        _                             => google_fonts::league_gothic_regular_variable(),
+    }.ok()?;
+    ab_glyph::FontVec::try_from_vec(bytes).ok()
 }
 
-impl FontLoader {
-    fn new(template_image: &Path) -> Self {
-        // template_image: ~/.image_tagger/templates/<id>/default.jpg
-        // Walk up to data_dir, then look for fonts/ sibling to templates/
-        let fonts_sibling = template_image
-            .parent()                  // <id>/
-            .and_then(|p| p.parent())  // templates/
-            .and_then(|p| p.parent())  // data dir
-            .map(|p| p.join("fonts"));
+// ── Favorites ─────────────────────────────────────────────────────────────────
 
-        let data_fonts = crate::storage::data_dir().join("fonts");
+fn favorites_path() -> PathBuf {
+    crate::storage::data_dir().join("meme_favorites")
+}
 
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if let Some(d) = fonts_sibling { dirs.push(d); }
-        dirs.push(data_fonts);
+pub fn load_favorites() -> std::collections::HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(favorites_path()) else {
+        return std::collections::HashSet::new();
+    };
+    text.lines()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
 
-        #[cfg(target_os = "windows")]
-        dirs.push(PathBuf::from("C:/Windows/Fonts"));
+fn save_favorites(favorites: &std::collections::HashSet<String>) {
+    let mut ids: Vec<&str> = favorites.iter().map(|s| s.as_str()).collect();
+    ids.sort();
+    let _ = std::fs::write(favorites_path(), ids.join("\n"));
+}
 
-        #[cfg(target_os = "macos")]
-        {
-            dirs.push(PathBuf::from("/Library/Fonts"));
-            dirs.push(PathBuf::from("/System/Library/Fonts/Supplemental"));
-            dirs.push(PathBuf::from("/System/Library/Fonts"));
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            dirs.push(PathBuf::from("/usr/share/fonts/truetype/msttcorefonts"));
-            dirs.push(PathBuf::from("/usr/share/fonts/truetype/liberation"));
-            dirs.push(PathBuf::from("/usr/share/fonts/truetype/noto"));
-            dirs.push(PathBuf::from("/usr/share/fonts/truetype/dejavu"));
-            dirs.push(PathBuf::from("/usr/share/fonts/truetype"));
-            dirs.push(PathBuf::from("/usr/share/fonts"));
-        }
-
-        Self { search_dirs: dirs }
+pub fn toggle_favorite(id: &str) -> std::collections::HashSet<String> {
+    let mut favs = load_favorites();
+    if !favs.remove(id) {
+        favs.insert(id.to_owned());
     }
-
-    fn get(&self, id_or_alias: &str) -> Option<ab_glyph::FontVec> {
-        for filename in self.filenames_for(id_or_alias) {
-            for dir in &self.search_dirs {
-                if let Ok(bytes) = std::fs::read(dir.join(filename)) {
-                    if let Ok(font) = ab_glyph::FontVec::try_from_vec(bytes) {
-                        return Some(font);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn filenames_for(&self, id_or_alias: &str) -> &'static [&'static str] {
-        match id_or_alias.to_lowercase().as_str() {
-            "thick" | "titilliumweb" => &[
-                "TitilliumWeb-Black.ttf",
-                "Impact.ttf", "impact.ttf",
-                "LiberationSans-Bold.ttf", "DejaVuSans-Bold.ttf",
-            ],
-            "impact" => &[
-                "Impact.ttf", "impact.ttf",
-                "TitilliumWeb-Black.ttf", "LiberationSans-Bold.ttf",
-            ],
-            "comic" | "kalam" => &[
-                "Kalam-Regular.ttf",
-                "Comic Sans MS.ttf", "ComicSansMS.ttf",
-                "NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf",
-            ],
-            "notosans" => &[
-                "NotoSans-Bold.ttf",
-                "LiberationSans-Bold.ttf", "DejaVuSans-Bold.ttf",
-            ],
-            "thin" | "titilliumweb-thin" => &[
-                "TitilliumWeb-SemiBold.ttf", "TitilliumWeb-Black.ttf",
-                "LiberationSans-Bold.ttf",
-            ],
-            "tiny" | "segoe" => &[
-                "Segoe UI Bold.ttf", "segoeuib.ttf",
-                "arial.ttf", "Arial.ttf", "LiberationSans-Bold.ttf",
-            ],
-            "jp" | "hgminchob" => &[
-                "HG-Mincho-B.ttc",
-                "NotoSansCJK-Bold.ttc", "NotoSansCJKjp-Bold.otf", "TakaoMincho.ttf",
-            ],
-            "he" | "notosanshebrew" => &[
-                "NotoSansHebrew-Bold.ttf", "NotoSans-Bold.ttf",
-            ],
-            _ => &[
-                "Impact.ttf", "impact.ttf",
-                "TitilliumWeb-Black.ttf",
-                "LiberationSans-Bold.ttf", "DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
-            ],
-        }
-    }
+    save_favorites(&favs);
+    favs
 }

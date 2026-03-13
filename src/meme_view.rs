@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
@@ -12,17 +13,37 @@ use crate::{
 #[allow(non_snake_case)]
 pub fn MemeView() -> Element {
     let mut templates: Signal<Vec<MemeTemplate>> = use_signal(meme_storage::load_templates);
-    let mut selected: Signal<Option<usize>> = use_signal(|| None);
+    let mut selected:  Signal<Option<String>>     = use_signal(|| None);
+    let mut favorites: Signal<HashSet<String>>    = use_signal(meme_storage::load_favorites);
 
     let refresh = move |_| {
         templates.set(meme_storage::load_templates());
         selected.set(None);
     };
 
-    let count = templates.read().len();
+    // Pre-compute outside rsx! to avoid borrow conflicts.
+    let all_templates = templates.read().clone();
+    let fav_set       = favorites.read().clone();
+    let selected_id   = selected.read().clone();
+
+    let fav_templates: Vec<MemeTemplate> = all_templates.iter()
+        .filter(|t| fav_set.contains(&t.id))
+        .cloned()
+        .collect();
+    let rest_templates: Vec<MemeTemplate> = all_templates.iter()
+        .filter(|t| !fav_set.contains(&t.id))
+        .cloned()
+        .collect();
+
+    let selected_tmpl: Option<(String, MemeTemplate)> = selected_id.as_ref()
+        .and_then(|id| all_templates.iter().find(|t| &t.id == id).map(|t| (t.id.clone(), t.clone())));
+    let selected_is_fav = selected_tmpl.as_ref()
+        .map(|(id, _)| fav_set.contains(id))
+        .unwrap_or(false);
+
+    let count       = all_templates.len();
     let count_label = format!("{} template{}", count, if count == 1 { "" } else { "s" });
-    let selected_tmpl: Option<(String, MemeTemplate)> = (*selected.read())
-        .and_then(|idx| templates.read().get(idx).map(|t| (t.id.clone(), t.clone())));
+    let has_favs    = !fav_templates.is_empty();
 
     rsx! {
         div {
@@ -51,19 +72,61 @@ pub fn MemeView() -> Element {
 
                 div {
                     style: "flex:1; overflow-y:auto; padding:20px;",
-                    if templates.read().is_empty() {
+                    if all_templates.is_empty() {
                         EmptyTemplates {}
                     } else {
+                        // Favorites section
+                        if has_favs {
+                            div {
+                                style: "font-size:10px; color:#7a6a30; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px;",
+                                "★  Favorites"
+                            }
+                            div {
+                                style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px; margin-bottom:24px;",
+                                for tmpl in fav_templates.iter() {
+                                    TemplateCard {
+                                        key: "fav-{tmpl.id}",
+                                        template: tmpl.clone(),
+                                        selected: selected_id.as_deref() == Some(tmpl.id.as_str()),
+                                        favorited: true,
+                                        onclick: {
+                                            let id = tmpl.id.clone();
+                                            move |_| {
+                                                let new = if selected.read().as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+                                                selected.set(new);
+                                            }
+                                        },
+                                        on_toggle_favorite: {
+                                            let id = tmpl.id.clone();
+                                            move |_| { favorites.set(meme_storage::toggle_favorite(&id)); }
+                                        },
+                                    }
+                                }
+                            }
+                            div {
+                                style: "font-size:10px; color:#3a3a50; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px;",
+                                "All Templates"
+                            }
+                        }
+                        // Non-favorite templates
                         div {
                             style: "display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:14px;",
-                            for (i, tmpl) in templates.read().iter().enumerate() {
+                            for tmpl in rest_templates.iter() {
                                 TemplateCard {
-                                    key: "{i}",
+                                    key: "{tmpl.id}",
                                     template: tmpl.clone(),
-                                    selected: *selected.read() == Some(i),
-                                    onclick: move |_| {
-                                        let new = if *selected.read() == Some(i) { None } else { Some(i) };
-                                        selected.set(new);
+                                    selected: selected_id.as_deref() == Some(tmpl.id.as_str()),
+                                    favorited: false,
+                                    onclick: {
+                                        let id = tmpl.id.clone();
+                                        move |_| {
+                                            let new = if selected.read().as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+                                            selected.set(new);
+                                        }
+                                    },
+                                    on_toggle_favorite: {
+                                        let id = tmpl.id.clone();
+                                        move |_| { favorites.set(meme_storage::toggle_favorite(&id)); }
                                     },
                                 }
                             }
@@ -73,7 +136,15 @@ pub fn MemeView() -> Element {
             }
 
             if let Some((tmpl_id, tmpl)) = selected_tmpl {
-                MemeEditor { key: "{tmpl_id}", template: tmpl }
+                MemeEditor {
+                    key: "{tmpl_id}",
+                    template: tmpl,
+                    favorited: selected_is_fav,
+                    on_toggle_favorite: {
+                        let id = tmpl_id.clone();
+                        move |_| { favorites.set(meme_storage::toggle_favorite(&id)); }
+                    },
+                }
             }
         }
     }
@@ -86,21 +157,36 @@ pub fn MemeView() -> Element {
 fn TemplateCard(
     template: MemeTemplate,
     selected: bool,
+    favorited: bool,
     onclick: EventHandler<MouseEvent>,
+    on_toggle_favorite: EventHandler<MouseEvent>,
 ) -> Element {
-    let data_url   = image_to_thumbnail_url(&template.image_path, 200);
-    let name       = template.display_name().to_string();
-    let n_fields   = template.text_field_count();
+    // Load thumbnail asynchronously so it never blocks the render thread.
+    let thumb_path = template.image_path.clone();
+    let thumb_res = use_resource(move || {
+        let p = thumb_path.clone();
+        async move {
+            tokio::task::spawn_blocking(move || image_to_thumbnail_url(&p, 200))
+                .await
+                .ok()
+                .flatten()
+        }
+    });
+    let data_url: Option<String> = thumb_res.read().as_ref().and_then(|v| v.clone());
+    let name        = template.display_name().to_string();
+    let n_fields    = template.text_field_count();
     let field_label = format!("{} text field{}", n_fields, if n_fields == 1 { "" } else { "s" });
-    let border = if selected { "#5b8dee" } else { "#1e1e26" };
+    let border      = if selected { "#5b8dee" } else { "#1e1e26" };
+    let star        = if favorited { "★" } else { "☆" };
+    let star_color  = if favorited { "#f0c040" } else { "#3a3a50" };
 
     rsx! {
         div {
-            style: "background:#13131a; border:1px solid {border}; border-radius:6px; overflow:hidden; cursor:pointer; transition:border-color 0.15s;",
+            style: "background:#13131a; border:1px solid {border}; border-radius:6px; overflow:hidden; cursor:pointer; transition:border-color 0.15s; position:relative;",
             onclick: move |e| onclick.call(e),
 
             div {
-                style: "width:100%; aspect-ratio:1/1; overflow:hidden; background:#0c0c0e;",
+                style: "width:100%; aspect-ratio:1/1; overflow:hidden; background:#0c0c0e; position:relative;",
                 if let Some(src) = data_url {
                     img { src: "{src}", style: "width:100%; height:100%; object-fit:cover; display:block;" }
                 } else {
@@ -108,6 +194,15 @@ fn TemplateCard(
                         style: "width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#2e2e3a; font-size:10px;",
                         "no preview"
                     }
+                }
+                // Star button overlaid on image
+                div {
+                    style: "position:absolute; top:5px; right:5px; cursor:pointer; font-size:13px; color:{star_color}; padding:2px 5px; background:rgba(0,0,0,0.6); border-radius:3px; line-height:1;",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        on_toggle_favorite.call(e);
+                    },
+                    "{star}"
                 }
             }
 
@@ -130,20 +225,35 @@ fn TemplateCard(
 
 #[component]
 #[allow(non_snake_case)]
-fn MemeEditor(template: MemeTemplate) -> Element {
+fn MemeEditor(
+    template: MemeTemplate,
+    favorited: bool,
+    on_toggle_favorite: EventHandler<()>,
+) -> Element {
     let n = template.text_field_count();
 
     let mut texts:      Signal<Vec<String>>                    = use_signal(|| vec![String::new(); n]);
     let mut generating: Signal<bool>                           = use_signal(|| false);
     let mut result:     Signal<Option<Result<PathBuf, String>>> = use_signal(|| None);
 
-    let template_data_url = image_to_data_url(&template.image_path);
-    let name              = template.display_name().to_string();
-    let id                = template.id.clone();
-    let memes_dir         = meme_storage::memes_dir();
+    let name      = template.display_name().to_string();
+    let id        = template.id.clone();
+    let memes_dir = meme_storage::memes_dir();
 
-    // Pre-compute what the preview image source should be:
-    // after a successful generate, show the output; otherwise the template.
+    // Load the template base image asynchronously.
+    let tmpl_img_path = template.image_path.clone();
+    let tmpl_url_res = use_resource(move || {
+        let p = tmpl_img_path.clone();
+        async move {
+            tokio::task::spawn_blocking(move || image_to_data_url(&p))
+                .await
+                .ok()
+                .flatten()
+        }
+    });
+    let template_data_url: Option<String> = tmpl_url_res.read().as_ref().and_then(|v| v.clone());
+
+    // After a successful generate, switch to showing the output image.
     let preview_src: Option<String> = {
         let r = result.read();
         if let Some(res) = r.as_ref() {
@@ -157,11 +267,8 @@ fn MemeEditor(template: MemeTemplate) -> Element {
         }
     };
 
-    // Pre-compute the status line so no match lives inside rsx!
     let status_ok:  Option<String> = result.read().as_ref().and_then(|r| {
-        r.as_ref().ok().and_then(|p| {
-            p.file_name().map(|n| n.to_string_lossy().to_string())
-        })
+        r.as_ref().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
     });
     let status_err: Option<String> = result.read().as_ref().and_then(|r| {
         r.as_ref().err().map(|e| e.clone())
@@ -170,6 +277,10 @@ fn MemeEditor(template: MemeTemplate) -> Element {
     let btn_disabled = *generating.read() || n == 0;
     let btn_label    = if *generating.read() { "Generating…" } else { "Generate Meme" };
     let btn_opacity  = if btn_disabled { "0.5" } else { "1" };
+
+    let fav_label  = if favorited { "★" } else { "☆" };
+    let fav_color  = if favorited { "#f0c040" } else { "#555" };
+    let fav_border = if favorited { "#8a7030" } else { "#2a2a38" };
 
     rsx! {
         div {
@@ -183,14 +294,22 @@ fn MemeEditor(template: MemeTemplate) -> Element {
             }
 
             div {
-                style: "padding:11px 14px; border-bottom:1px solid #1a1a22; flex-shrink:0;",
+                style: "padding:11px 14px; border-bottom:1px solid #1a1a22; flex-shrink:0; display:flex; align-items:center; gap:8px;",
                 div {
-                    style: "font-size:12px; color:#ddd; margin-bottom:2px; word-break:break-all;",
-                    "{name}"
+                    style: "flex:1; min-width:0;",
+                    div {
+                        style: "font-size:12px; color:#ddd; margin-bottom:2px; word-break:break-all;",
+                        "{name}"
+                    }
+                    div {
+                        style: "font-size:10px; color:#3a3a50; letter-spacing:0.04em;",
+                        "{id}"
+                    }
                 }
-                div {
-                    style: "font-size:10px; color:#3a3a50; letter-spacing:0.04em;",
-                    "{id}"
+                button {
+                    style: "flex-shrink:0; padding:3px 8px; background:transparent; border:1px solid {fav_border}; border-radius:4px; color:{fav_color}; font-size:15px; cursor:pointer; line-height:1;",
+                    onclick: move |_| on_toggle_favorite.call(()),
+                    "{fav_label}"
                 }
             }
 

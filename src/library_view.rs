@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use crate::{image_to_data_url, image_to_thumbnail_url, storage::{self, LibraryEntry, update_ui_state}, Tab};
+use crate::{image_to_data_url, storage::{self, LibraryEntry, update_ui_state}, Tab};
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -92,7 +92,18 @@ fn LibraryCard(
     selected: bool,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
-    let data_url = image_to_thumbnail_url(&entry.image_path, 200);
+    // Load thumbnail asynchronously so the library render never blocks.
+    let thumb_path = entry.image_path.clone();
+    let thumb_res = use_resource(move || {
+        let p = thumb_path.clone();
+        async move {
+            tokio::task::spawn_blocking(move || crate::image_to_thumbnail_url(&p, 200))
+                .await
+                .ok()
+                .flatten()
+        }
+    });
+    let data_url: Option<String> = thumb_res.read().as_ref().and_then(|v| v.clone());
     let name     = entry.image_file_name();
     let tag_count = entry.tags.len() + entry.custom_tags.len();
     let tag_label = format!("{} tag{}", tag_count, if tag_count == 1 { "" } else { "s" });

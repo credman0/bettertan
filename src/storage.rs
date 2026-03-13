@@ -115,38 +115,47 @@ pub fn save_or_update_entry(
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 /// Scan the data dir and return every (image, idx) pair that is well-formed.
+/// Also scans the `memes/` subdirectory so generated memes appear here too.
 pub fn load_all_entries() -> Vec<LibraryEntry> {
     let dir = data_dir();
     if !dir.exists() {
         return vec![];
     }
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return vec![];
-    };
 
-    let mut entries: Vec<LibraryEntry> = rd
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            // Skip non-image files (including .idx files)
-            let ext = p.extension()?.to_str()?.to_lowercase();
-            if !matches!(
-                ext.as_str(),
-                "jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif" | "tiff"
-            ) {
-                return None;
-            }
-            let idx = idx_path_for(&p);
-            if !idx.exists() {
-                return None;
-            }
-            parse_idx(&p, &idx).ok()
-        })
-        .collect();
+    let mut entries: Vec<LibraryEntry> = Vec::new();
+    scan_dir_for_entries(&dir, &mut entries);
+    let memes_subdir = dir.join("memes");
+    if memes_subdir.exists() {
+        scan_dir_for_entries(&memes_subdir, &mut entries);
+    }
 
     // Stable order: sort alphabetically by file name
     entries.sort_by(|a, b| a.image_file_name().cmp(&b.image_file_name()));
     entries
+}
+
+fn scan_dir_for_entries(dir: &Path, entries: &mut Vec<LibraryEntry>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let ext = match p.extension().and_then(|s| s.to_str()) {
+            Some(e) => e.to_lowercase(),
+            None => continue,
+        };
+        if !matches!(
+            ext.as_str(),
+            "jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif" | "tiff"
+        ) {
+            continue;
+        }
+        let idx = idx_path_for(&p);
+        if !idx.exists() {
+            continue;
+        }
+        if let Ok(entry) = parse_idx(&p, &idx) {
+            entries.push(entry);
+        }
+    }
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
