@@ -375,6 +375,7 @@ dependencies = [
  "num_cpus",
  "ort",
  "paddle-ocr-rs",
+ "reqwest",
  "rfd 0.17.2",
  "tokio",
 ]
