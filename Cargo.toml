@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+base64 = "0.22.1"
+dioxus = { version = "0.6", features = ["desktop"] }
 image = "0.25.9"
 ndarray = "0.17.2"
+num_cpus = "1.17.0"
 ort = "=2.0.0-rc.12"
+rfd = "0.17.2"
+tokio = "1.50.0"

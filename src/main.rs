@@ -1,171 +1,372 @@
-use anyhow::{anyhow, bail, Context, Result};
-use image::{imageops::FilterType, DynamicImage};
-use ndarray::{s, Array4, Ix1};
-use ort::{
-    session::{builder::GraphOptimizationLevel, Session},
-    value::TensorRef,
-};
+#![allow(non_snake_case)]
 
-const IMAGE_SIZE: u32 = 384;
-const MODEL_PATH: &str = "resources/ram_plus_swin_large_14m.onnx";
-const TAGS_PATH: &str = "resources/ram_tag_list.txt";
+mod tagger;
 
-const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-fn ort_err<E: std::fmt::Display>(e: E) -> anyhow::Error {
-    anyhow!(e.to_string())
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use dioxus::prelude::*;
+use tagger::{TagOptions, TagOutput, Tagger};
+
+// ── App entry-point ───────────────────────────────────────────────────────────
+
+fn main() {
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(
+            dioxus::desktop::Config::new()
+                .with_window(
+                    dioxus::desktop::WindowBuilder::new()
+                        .with_title("Image Tagger")
+                        .with_inner_size(dioxus::desktop::LogicalSize::new(960.0, 640.0))
+                        .with_resizable(true),
+                )
+                .with_custom_head(r#"<style>
+                    * { box-sizing: border-box; margin: 0; padding: 0; }
+                    body { background: #0f0f11; color: #e8e6e3; font-family: 'SF Mono', 'Fira Code', monospace; }
+                    ::-webkit-scrollbar { width: 6px; }
+                    ::-webkit-scrollbar-track { background: transparent; }
+                    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+                </style>"#.into()),
+        )
+        .launch(App);
 }
 
-fn load_tags(path: &str) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read tag file: {path}"))?;
+// ── Shared tagger state ───────────────────────────────────────────────────────
 
-    let tags = text
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+type SharedTagger = Arc<Mutex<Option<Tagger>>>;
 
-    Ok(tags)
-}
-
-fn preprocess_image(path: &str, image_size: u32) -> Result<Array4<f32>> {
-    let img = image::open(path)
-        .with_context(|| format!("failed to open image: {path}"))?;
-    let rgb = to_resized_rgb8(img, image_size, image_size);
-
-    let mut input = Array4::<f32>::zeros((1, 3, image_size as usize, image_size as usize));
-
-    for (y, row) in rgb.rows().enumerate() {
-        for (x, pixel) in row.enumerate() {
-            let r = (pixel[0] as f32 / 255.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-            let g = (pixel[1] as f32 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-            let b = (pixel[2] as f32 / 255.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
-
-            input[[0, 0, y, x]] = r;
-            input[[0, 1, y, x]] = g;
-            input[[0, 2, y, x]] = b;
-        }
-    }
-
-    Ok(input)
-}
-
-fn to_resized_rgb8(img: DynamicImage, width: u32, height: u32) -> image::RgbImage {
-    img.resize_exact(width, height, FilterType::CatmullRom).to_rgb8()
-}
-
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
-
-fn topk_indices(values: &[f32], k: usize) -> Vec<usize> {
-    let mut idxs: Vec<usize> = (0..values.len()).collect();
-    idxs.sort_by(|&a, &b| {
-        values[b]
-            .partial_cmp(&values[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
+fn init_tagger() -> SharedTagger {
+    let shared: SharedTagger = Arc::new(Mutex::new(None));
+    let clone = Arc::clone(&shared);
+    std::thread::spawn(move || match Tagger::new() {
+        Ok(t) => *clone.lock().unwrap() = Some(t),
+        Err(e) => eprintln!("Failed to initialise tagger: {e}"),
     });
-    idxs.truncate(k.min(idxs.len()));
-    idxs
+    shared
 }
 
-fn main() -> Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.is_empty() {
-        bail!("usage: cargo run -- <image.jpg> [threshold] [topk]");
-    }
+// ── Root component ────────────────────────────────────────────────────────────
 
-    let image_path = &args[0];
-    let threshold: f32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.68);
-    let topk: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+fn App() -> Element {
+    let tagger = use_context_provider(init_tagger);
 
-    let tags = load_tags(TAGS_PATH)?;
-    let input = preprocess_image(image_path, IMAGE_SIZE)?;
+    // UI state
+    let mut image_src: Signal<Option<String>> = use_signal(|| None);
+    let mut output: Signal<Option<Result<TagOutput, String>>> = use_signal(|| None);
+    let mut is_loading = use_signal(|| false);
+    let mut threshold = use_signal(|| 0.68_f32);
+    let topk = use_signal(|| 30_usize);
 
-    let mut session = Session::builder()
-        .map_err(ort_err)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(ort_err)?
-        .with_intra_threads(1)
-        .map_err(ort_err)?
-        .commit_from_file(MODEL_PATH)
-        .map_err(ort_err)
-        .with_context(|| format!("failed to load model: {MODEL_PATH}"))?;
-
-    let input_tensor = TensorRef::from_array_view(&input).map_err(ort_err)?;
-    let outputs = session
-        .run(ort::inputs!["pixel_values" => input_tensor])
-        .map_err(ort_err)?;
-
-    let probs_vec: Vec<f32> = if let Some(value) = outputs.get("probs") {
-        let arr = value.try_extract_array::<f32>().map_err(ort_err)?;
-        arr.view()
-            .into_dimensionality::<Ix1>()
-            .map(|a| a.to_vec())
-            .or_else(|_| {
-                let arr2 = arr.view().into_dimensionality::<ndarray::Ix2>()?;
-                Ok::<Vec<f32>, ndarray::ShapeError>(arr2.slice(s![0, ..]).to_vec())
+    // Run inference whenever image_path changes
+    let mut run_inference = move |path: PathBuf| {
+        is_loading.set(true);
+        output.set(None);
+        let tagger_arc = Arc::clone(&tagger);
+        let opts = TagOptions {
+            threshold: *threshold.read(),
+            topk: *topk.read(),
+        };
+        let path_str = path.to_string_lossy().to_string();
+        // spawn_blocking runs the inference on a threadpool thread;
+        // the surrounding `spawn` is a Dioxus async task that CAN access signals.
+        spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let mut guard = tagger_arc.lock().unwrap();
+                match guard.as_mut() {
+                    Some(t) => t.tag_image(&path_str, opts).map_err(|e| e.to_string()),
+                    None => Err("Tagger still initialising — please try again shortly.".into()),
+                }
             })
-            .context("unexpected shape for probs output")?
-    } else if let Some(value) = outputs.get("logits") {
-        let arr = value.try_extract_array::<f32>().map_err(ort_err)?;
-        let logits = arr
-            .view()
-            .into_dimensionality::<Ix1>()
-            .map(|a| a.to_vec())
-            .or_else(|_| {
-                let arr2 = arr.view().into_dimensionality::<ndarray::Ix2>()?;
-                Ok::<Vec<f32>, ndarray::ShapeError>(arr2.slice(s![0, ..]).to_vec())
-            })
-            .context("unexpected shape for logits output")?;
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
 
-        logits.into_iter().map(sigmoid).collect()
-    } else {
-        bail!("model outputs did not include `probs` or `logits`");
+            output.set(Some(result));
+            is_loading.set(false);
+        });
     };
 
-    if probs_vec.len() != tags.len() {
-        bail!(
-            "tag count mismatch: model produced {} scores, tag file has {} entries",
-            probs_vec.len(),
-            tags.len()
-        );
-    }
+    // File picker handler
+    let open_file = move |_| {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"])
+            .pick_file()
+        {
+            if let Some(data_url) = image_to_data_url(&path) {
+                image_src.set(Some(data_url));
+            }
+            run_inference(path);
+        }
+    };
 
-    println!("Image: {image_path}");
-    println!("Model: {MODEL_PATH}");
-    println!("Tags: {TAGS_PATH}");
-    println!();
-    println!("Predicted tags (threshold = {threshold:.3}):");
+    rsx! {
+        div {
+            style: "display:flex; flex-direction:column; height:100vh; background:#0f0f11;",
 
-    let mut selected: Vec<(usize, f32)> = probs_vec
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, p)| *p >= threshold)
-        .collect();
+            // ── Top bar ───────────────────────────────────────────────────
+            div {
+                style: "display:flex; align-items:center; gap:16px; padding:14px 20px;
+                        border-bottom:1px solid #222; background:#13131a; flex-shrink:0;",
 
-    selected.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+                span {
+                    style: "font-size:13px; letter-spacing:0.15em; color:#666; text-transform:uppercase;",
+                    "Image Tagger"
+                }
 
-    if selected.is_empty() {
-        println!("(none above threshold)");
-    } else {
-        for (idx, score) in &selected {
-            println!("{score:.4}\t{}", tags[*idx]);
+                div { style: "flex:1;" }
+
+                // Threshold control
+                label {
+                    style: "font-size:11px; color:#555; letter-spacing:0.1em; text-transform:uppercase;",
+                    "Threshold"
+                }
+                input {
+                    r#type: "range",
+                    min: "0.0", max: "1.0", step: "0.01",
+                    value: "{threshold}",
+                    style: "width:80px; accent-color:#5b8dee;",
+                    oninput: move |e| {
+                        if let Ok(v) = e.value().parse::<f32>() {
+                            threshold.set(v);
+                        }
+                    }
+                }
+                span {
+                    style: "font-size:11px; color:#888; width:36px; text-align:right;",
+                    "{threshold:.2}"
+                }
+
+                // Open button
+                button {
+                    style: "padding:8px 18px; background:#5b8dee; color:#fff; border:none;
+                            border-radius:4px; font-family:inherit; font-size:12px;
+                            letter-spacing:0.08em; cursor:pointer; transition:background 0.15s;",
+                    onclick: open_file,
+                    "Open Image"
+                }
+            }
+
+            // ── Content area ──────────────────────────────────────────────
+            div {
+                style: "display:flex; flex:1; overflow:hidden;",
+
+                // Left: image preview
+                div {
+                    style: "width:50%; display:flex; align-items:center; justify-content:center;
+                            background:#0c0c0e; border-right:1px solid #1e1e26; overflow:hidden;",
+
+                    if let Some(src) = image_src.read().as_ref() {
+                        img {
+                            src: "{src}",
+                            style: "max-width:100%; max-height:100%; object-fit:contain;
+                                    display:block; padding:24px;"
+                        }
+                    } else {
+                        div {
+                            style: "display:flex; flex-direction:column; align-items:center; gap:12px; color:#2e2e3a;",
+                            svg {
+                                width: "64", height: "64", view_box: "0 0 24 24",
+                                fill: "none", stroke: "currentColor", stroke_width: "1",
+                                stroke_linecap: "round", stroke_linejoin: "round",
+                                path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
+                                polyline { points: "17 8 12 3 7 8" }
+                                line { x1: "12", y1: "3", x2: "12", y2: "15" }
+                            }
+                            span {
+                                style: "font-size:12px; letter-spacing:0.12em; text-transform:uppercase;",
+                                "No image selected"
+                            }
+                        }
+                    }
+                }
+
+                // Right: tag results
+                div {
+                    style: "width:50%; display:flex; flex-direction:column; overflow:hidden;",
+
+                    if *is_loading.read() {
+                        div {
+                            style: "flex:1; display:flex; align-items:center; justify-content:center;",
+                            div {
+                                style: "display:flex; flex-direction:column; align-items:center; gap:16px; color:#444;",
+                                div {
+                                    style: "width:32px; height:32px; border:2px solid #333;
+                                            border-top-color:#5b8dee; border-radius:50%;
+                                            animation: spin 0.8s linear infinite;",
+                                }
+                                span {
+                                    style: "font-size:11px; letter-spacing:0.15em; text-transform:uppercase;",
+                                    "Running inference…"
+                                }
+                            }
+                        }
+                    } else if let Some(result) = output.read().as_ref() {
+                        match result {
+                            Err(msg) => rsx! {
+                                div {
+                                    style: "flex:1; display:flex; align-items:center; justify-content:center; padding:32px;",
+                                    div {
+                                        style: "color:#c0392b; font-size:12px; line-height:1.6; text-align:center;",
+                                        "⚠  {msg}"
+                                    }
+                                }
+                            },
+                            Ok(out) => rsx! {
+                                TagPanel { output: out.clone() }
+                            },
+                        }
+                    } else {
+                        div {
+                            style: "flex:1; display:flex; align-items:center; justify-content:center; color:#252530;",
+                            span {
+                                style: "font-size:11px; letter-spacing:0.12em; text-transform:uppercase;",
+                                "Tags will appear here"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Spinner keyframe (injected once)
+        style {
+            "@keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}"
         }
     }
+}
 
-    println!();
-    println!("Top {topk} tags:");
-    for idx in topk_indices(&probs_vec, topk) {
-        println!("{:.4}\t{}", probs_vec[idx], tags[idx]);
+// ── Tag panel ─────────────────────────────────────────────────────────────────
+
+#[component]
+fn TagPanel(output: TagOutput) -> Element {
+    let mut show_topk = use_signal(|| false);
+
+    let display_tags = if *show_topk.read() {
+        &output.topk
+    } else {
+        &output.above_threshold
+    };
+
+    let max_score = display_tags
+        .iter()
+        .map(|t| t.score)
+        .fold(0.0_f32, f32::max)
+        .max(0.001);
+
+    rsx! {
+        // Tab bar
+        div {
+            style: "display:flex; border-bottom:1px solid #1e1e26; flex-shrink:0; padding:0 16px; gap:4px; background:#0f0f11;",
+
+            TabButton {
+                label: format!("Above threshold ({})", output.above_threshold.len()),
+                active: !*show_topk.read(),
+                onclick: move |_| show_topk.set(false),
+            }
+            TabButton {
+                label: format!("Top {} by score", output.topk.len()),
+                active: *show_topk.read(),
+                onclick: move |_| show_topk.set(true),
+            }
+        }
+
+        // Tag list
+        div {
+            style: "flex:1; overflow-y:auto; padding:8px 0;",
+
+            if display_tags.is_empty() {
+                div {
+                    style: "padding:40px; text-align:center; color:#333; font-size:12px; letter-spacing:0.1em;",
+                    "No tags above threshold"
+                }
+            } else {
+                for tag in display_tags.iter() {
+                    TagRow {
+                        key: "{tag.tag}",
+                        tag: tag.tag.clone(),
+                        score: tag.score,
+                        max_score,
+                    }
+                }
+            }
+        }
     }
+}
 
-    Ok(())
+// ── Tab button ────────────────────────────────────────────────────────────────
+
+#[component]
+fn TabButton(label: String, active: bool, onclick: EventHandler<MouseEvent>) -> Element {
+    let border = if active { "border-bottom: 2px solid #5b8dee;" } else { "border-bottom: 2px solid transparent;" };
+    let color = if active { "color:#e8e6e3;" } else { "color:#555;" };
+
+    rsx! {
+        button {
+            style: "padding:10px 14px; background:none; border:none; {border} {color}
+                    font-family:inherit; font-size:11px; letter-spacing:0.1em;
+                    text-transform:uppercase; cursor:pointer; transition:color 0.15s;",
+            onclick: move |e| onclick.call(e),
+            "{label}"
+        }
+    }
+}
+
+// ── Individual tag row ────────────────────────────────────────────────────────
+
+#[component]
+fn TagRow(tag: String, score: f32, max_score: f32) -> Element {
+    let bar_pct = (score / max_score * 100.0) as u32;
+    let color = score_color(score);
+
+    rsx! {
+        div {
+            style: "display:flex; align-items:center; gap:12px; padding:6px 20px;
+                    transition:background 0.1s; cursor:default;",
+            onmouseenter: |e| { e.stop_propagation(); },
+
+            // Score badge
+            span {
+                style: "font-size:11px; color:{color}; width:44px; text-align:right; flex-shrink:0; letter-spacing:0.03em;",
+                "{score:.3}"
+            }
+
+            // Bar
+            div {
+                style: "flex:1; height:3px; background:#1e1e26; border-radius:2px; overflow:hidden;",
+                div {
+                    style: "height:100%; width:{bar_pct}%; background:{color}; border-radius:2px; transition:width 0.3s ease;",
+                }
+            }
+
+            // Tag name
+            span {
+                style: "font-size:12px; color:#ccc; min-width:140px; letter-spacing:0.02em;",
+                "{tag}"
+            }
+        }
+    }
+}
+
+fn score_color(score: f32) -> &'static str {
+    if score >= 0.85 { "#5b8dee" }
+    else if score >= 0.70 { "#7ecba1" }
+    else if score >= 0.50 { "#d4a853" }
+    else { "#8a6a6a" }
+}
+
+// ── Image helpers ─────────────────────────────────────────────────────────────
+
+fn image_to_data_url(path: &PathBuf) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let mime = match path.extension()?.to_str()?.to_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png"          => "image/png",
+        "webp"         => "image/webp",
+        "gif"          => "image/gif",
+        "bmp"          => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        _              => "image/jpeg",
+    };
+    let encoded = BASE64.encode(&bytes);
+    Some(format!("data:{mime};base64,{encoded}"))
 }
