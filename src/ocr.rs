@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use paddle_ocr_rs::ocr_lite::OcrLite;
+use paddle_ocr_rs::{EngineConfig, OcrCallOptions, OcrInput, RapidOcr};
 
 use crate::storage::data_dir;
 
@@ -29,13 +29,13 @@ pub fn model_setup_instructions() -> String {
 
 // ── OcrEngine ─────────────────────────────────────────────────────────────────
 
-/// Wraps an initialised `OcrLite` session.
+/// Wraps an initialised `RapidOcr` session.
 ///
 /// Build once with [`OcrEngine::new`]; reuse for multiple images.
 /// Returns `Err` with human-readable setup instructions when the model files
 /// are absent so the UI can surface the message directly.
 pub struct OcrEngine {
-    ocr: OcrLite,
+    ocr: RapidOcr,
 }
 
 impl OcrEngine {
@@ -53,13 +53,16 @@ impl OcrEngine {
             }
         }
 
-        let det_str = det.to_str().context("non-UTF-8 det model path")?;
-        let cls_str = cls.to_str().context("non-UTF-8 cls model path")?;
-        let rec_str = rec.to_str().context("non-UTF-8 rec model path")?;
+        let mut config = EngineConfig::default();
+        config.det.model_path = Some(det);
+        config.det.allow_download = false;
+        config.cls.model_path = Some(cls);
+        config.cls.allow_download = false;
+        config.rec.model.model_path = Some(rec);
+        config.rec.model.allow_download = false;
 
-        let mut ocr = OcrLite::new();
-        ocr.init_models(det_str, cls_str, rec_str, 2)
-            .map_err(|e| anyhow::anyhow!("OCR init failed: {:?}", e))?;
+        let ocr = RapidOcr::new(config)
+            .map_err(|e| anyhow::anyhow!("OCR init failed: {e:#}"))?;
 
         Ok(Self { ocr })
     }
@@ -71,23 +74,18 @@ impl OcrEngine {
     pub fn extract_text(&mut self, image_path: &str) -> Result<String> {
         let result = self
             .ocr
-            .detect_from_path(
-                image_path,
-                50,    // padding
-                1024,  // max side len
-                0.5,   // db_thresh
-                0.3,   // db_box_thresh
-                1.6,   // db_unclip_ratio
-                false, // do_angle_cls
-                false, // most_angle_cls
+            .run(
+                OcrInput::Path(image_path.into()),
+                OcrCallOptions::default(),
             )
-            .map_err(|e| anyhow::anyhow!("OCR inference failed: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("OCR inference failed: {e:#}"))?;
 
         let text = result
-            .text_blocks
-            .iter()
-            .map(|b| b.text.trim())
-            .filter(|s:String| !s.is_empty())
+            .txts
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
 
