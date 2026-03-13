@@ -37,9 +37,6 @@ pub fn MemeView() -> Element {
 
     let selected_tmpl: Option<(String, MemeTemplate)> = selected_id.as_ref()
         .and_then(|id| all_templates.iter().find(|t| &t.id == id).map(|t| (t.id.clone(), t.clone())));
-    let selected_is_fav = selected_tmpl.as_ref()
-        .map(|(id, _)| fav_set.contains(id))
-        .unwrap_or(false);
 
     let count       = all_templates.len();
     let count_label = format!("{} template{}", count, if count == 1 { "" } else { "s" });
@@ -139,11 +136,7 @@ pub fn MemeView() -> Element {
                 MemeEditor {
                     key: "{tmpl_id}",
                     template: tmpl,
-                    favorited: selected_is_fav,
-                    on_toggle_favorite: {
-                        let id = tmpl_id.clone();
-                        move |_| { favorites.set(meme_storage::toggle_favorite(&id)); }
-                    },
+                    favorites,
                 }
             }
         }
@@ -227,8 +220,7 @@ fn TemplateCard(
 #[allow(non_snake_case)]
 fn MemeEditor(
     template: MemeTemplate,
-    favorited: bool,
-    on_toggle_favorite: EventHandler<()>,
+    favorites: Signal<HashSet<String>>,
 ) -> Element {
     let n = template.text_field_count();
 
@@ -236,9 +228,12 @@ fn MemeEditor(
     let mut generating: Signal<bool>                           = use_signal(|| false);
     let mut result:     Signal<Option<Result<PathBuf, String>>> = use_signal(|| None);
 
-    let name      = template.display_name().to_string();
-    let id        = template.id.clone();
-    let memes_dir = meme_storage::memes_dir();
+    let name        = template.display_name().to_string();
+    let id          = template.id.clone();
+    let library_dir = meme_storage::memes_dir();
+
+    // Read favorites reactively so this component re-renders on changes.
+    let favorited   = favorites.read().contains(&id);
 
     // Load the template base image asynchronously.
     let tmpl_img_path = template.image_path.clone();
@@ -308,7 +303,10 @@ fn MemeEditor(
                 }
                 button {
                     style: "flex-shrink:0; padding:3px 8px; background:transparent; border:1px solid {fav_border}; border-radius:4px; color:{fav_color}; font-size:15px; cursor:pointer; line-height:1;",
-                    onclick: move |_| on_toggle_favorite.call(()),
+                    onclick: {
+                        let id = id.clone();
+                        move |_| { favorites.set(meme_storage::toggle_favorite(&id)); }
+                    },
                     "{fav_label}"
                 }
             }
@@ -380,9 +378,9 @@ fn MemeEditor(
                 button {
                     style: "width:100%; padding:6px 0; background:transparent; color:#444; border:1px solid #1e1e28; border-radius:4px; font-family:inherit; font-size:10px; letter-spacing:0.1em; cursor:pointer;",
                     onclick: move |_| {
-                        let _ = open_in_file_manager(&memes_dir);
+                        let _ = open_in_file_manager(&library_dir);
                     },
-                    "Open Memes Folder"
+                    "Open Library Folder"
                 }
             }
         }

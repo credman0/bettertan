@@ -10,7 +10,7 @@ pub fn templates_dir() -> PathBuf {
 }
 
 pub fn memes_dir() -> PathBuf {
-    crate::storage::data_dir().join("memes")
+    crate::storage::data_dir()
 }
 
 // ── Config types — exact memegen schema ──────────────────────────────────────

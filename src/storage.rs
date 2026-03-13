@@ -124,10 +124,6 @@ pub fn load_all_entries() -> Vec<LibraryEntry> {
 
     let mut entries: Vec<LibraryEntry> = Vec::new();
     scan_dir_for_entries(&dir, &mut entries);
-    let memes_subdir = dir.join("memes");
-    if memes_subdir.exists() {
-        scan_dir_for_entries(&memes_subdir, &mut entries);
-    }
 
     // Stable order: sort alphabetically by file name
     entries.sort_by(|a, b| a.image_file_name().cmp(&b.image_file_name()));
