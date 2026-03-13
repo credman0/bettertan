@@ -95,7 +95,14 @@ pub fn LibraryView() -> Element {
             // ── Right: detail panel ───────────────────────────────────────────
             if let Some(idx) = *selected.read() {
                 if let Some(entry) = entries.read().get(idx).cloned() {
-                    DetailPanel { entry }
+                    DetailPanel {
+                        entry,
+                        on_delete: move |_| {
+                            selected.set(None);
+                            let _ = update_ui_state(|s| s.library_selected = None);
+                            entries.set(storage::load_all_entries());
+                        },
+                    }
                 }
             }
         }
@@ -163,7 +170,7 @@ fn LibraryCard(
 
 #[component]
 #[allow(non_snake_case)]
-fn DetailPanel(entry: LibraryEntry) -> Element {
+fn DetailPanel(entry: LibraryEntry, on_delete: EventHandler<MouseEvent>) -> Element {
     let mut pending_image = use_context::<Signal<Option<PathBuf>>>();
     let mut active_tab    = use_context::<Signal<Tab>>();
 
@@ -251,6 +258,22 @@ fn DetailPanel(entry: LibraryEntry) -> Element {
                         style: "font-size:11px; color:#2e2e3a; text-align:center; padding-top:20px; letter-spacing:0.08em;",
                         "no tags recorded"
                     }
+                }
+            }
+
+            // Delete button
+            div {
+                style: "padding:10px 14px; border-top:1px solid #1a1a22; flex-shrink:0;",
+                button {
+                    style: "width:100%; padding:6px 0; background:transparent; color:#9a4a4a; border:1px solid #3a2020; border-radius:4px; font-family:inherit; font-size:10px; letter-spacing:0.1em; cursor:pointer;",
+                    onclick: {
+                        let path = entry.image_path.clone();
+                        move |e: MouseEvent| {
+                            let _ = storage::delete_entry(&path);
+                            on_delete.call(e);
+                        }
+                    },
+                    "Delete from Library"
                 }
             }
         }

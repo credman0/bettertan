@@ -100,8 +100,8 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
 
     let img = image::open(image_path)
         .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", image_path.display()))?;
-    let canvas = img.to_rgba8();
-    let img_w = canvas.width();
+    let mut canvas = img.to_rgba8();
+    let (img_w, img_h) = (canvas.width(), canvas.height());
 
     if text.trim().is_empty() {
         anyhow::bail!("No text entered.");
@@ -112,8 +112,8 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
 
     let display_text = text.to_uppercase();
 
-    // Use a fixed font size proportional to image width, then word-wrap and
-    // expand the text area downward as needed (instead of shrinking the font).
+    // Use a fixed font size proportional to image width, word-wrap on
+    // whitespace, and draw overlaid on the bottom of the image.
     let font_size = (img_w as f32 * 0.07).clamp(20.0, 120.0);
     let scale = PxScale::from(font_size);
     let line_h = font_size * 1.25;
@@ -121,14 +121,11 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
     let usable_w = img_w.saturating_sub(padding * 2);
 
     let lines = word_wrap(&font, &display_text, scale, usable_w);
-    let total_h = lines.len() as f32 * line_h + padding as f32 * 2.0;
+    let total_h = lines.len() as f32 * line_h;
 
-    // Extend the canvas downward to fit the text block.
-    let new_h = canvas.height() + total_h as u32;
-    let mut extended = image::RgbaImage::from_pixel(img_w, new_h, image::Rgba([0, 0, 0, 255]));
-    image::imageops::overlay(&mut extended, &canvas, 0, 0);
-
-    let block_top = canvas.height() as f32 + padding as f32;
+    // Position the text block so its bottom edge sits at the bottom of the
+    // image (with a small padding).
+    let block_top = img_h as f32 - total_h - padding as f32;
 
     let fg = image::Rgba([255, 255, 255, 255]);
     let stroke = image::Rgba([0, 0, 0, 255]);
@@ -142,11 +139,11 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
         for ox in -2i32..=2 {
             for oy in -2i32..=2 {
                 if ox != 0 || oy != 0 {
-                    draw_text_mut(&mut extended, stroke, draw_x + ox, draw_y + oy, scale, &font, line);
+                    draw_text_mut(&mut canvas, stroke, draw_x + ox, draw_y + oy, scale, &font, line);
                 }
             }
         }
-        draw_text_mut(&mut extended, fg, draw_x, draw_y, scale, &font, line);
+        draw_text_mut(&mut canvas, fg, draw_x, draw_y, scale, &font, line);
     }
 
     let dir = storage::data_dir();
@@ -157,7 +154,7 @@ fn generate_blank_with_text(image_path: &std::path::Path, text: &str) -> anyhow:
         .unwrap_or_default()
         .as_secs();
     let out = dir.join(format!("blank_{}_{}.png", stem, ts));
-    extended.save(&out).map_err(|e| anyhow::anyhow!("cannot save: {e}"))?;
+    canvas.save(&out).map_err(|e| anyhow::anyhow!("cannot save: {e}"))?;
 
     // Write a library .idx sidecar so it appears in the image library.
     let idx_path = storage::idx_path_for(&out);
@@ -471,6 +468,10 @@ pub fn BlanksView() -> Element {
                     key: "{entry.file_name}",
                     entry,
                     favorites,
+                    on_delete: move |_| {
+                        selected.set(None);
+                        blanks.set(load_blanks());
+                    },
                 }
             }
         }
@@ -545,7 +546,7 @@ fn BlankCard(
 
 #[component]
 #[allow(non_snake_case)]
-fn BlankEditor(entry: BlankEntry, favorites: Signal<HashSet<String>>) -> Element {
+fn BlankEditor(entry: BlankEntry, favorites: Signal<HashSet<String>>, on_delete: EventHandler<MouseEvent>) -> Element {
     let mut text: Signal<String> = use_signal(String::new);
     let mut generating: Signal<bool> = use_signal(|| false);
     let mut result: Signal<Option<Result<PathBuf, String>>> = use_signal(|| None);
@@ -689,11 +690,23 @@ fn BlankEditor(entry: BlankEntry, favorites: Signal<HashSet<String>>) -> Element
                 }
 
                 button {
-                    style: "width:100%; padding:6px 0; background:transparent; color:#444; border:1px solid #1e1e28; border-radius:4px; font-family:inherit; font-size:10px; letter-spacing:0.1em; cursor:pointer;",
+                    style: "width:100%; padding:6px 0; background:transparent; color:#444; border:1px solid #1e1e28; border-radius:4px; font-family:inherit; font-size:10px; letter-spacing:0.1em; cursor:pointer; margin-bottom:6px;",
                     onclick: move |_| {
                         let _ = open_in_file_manager(&library_dir);
                     },
                     "Open Library Folder"
+                }
+
+                button {
+                    style: "width:100%; padding:6px 0; background:transparent; color:#9a4a4a; border:1px solid #3a2020; border-radius:4px; font-family:inherit; font-size:10px; letter-spacing:0.1em; cursor:pointer;",
+                    onclick: {
+                        let path = entry.image_path.clone();
+                        move |e: MouseEvent| {
+                            let _ = std::fs::remove_file(&path);
+                            on_delete.call(e);
+                        }
+                    },
+                    "Delete Blank"
                 }
             }
         }

@@ -132,6 +132,22 @@ impl LibraryEntry {
     }
 }
 
+// ── Delete ────────────────────────────────────────────────────────────────────
+
+/// Remove a library entry: deletes the image file and its `.idx` sidecar.
+pub fn delete_entry(image_path: &Path) -> Result<()> {
+    let idx = idx_path_for(image_path);
+    if image_path.exists() {
+        std::fs::remove_file(image_path)
+            .with_context(|| format!("failed to delete {}", image_path.display()))?;
+    }
+    if idx.exists() {
+        std::fs::remove_file(&idx)
+            .with_context(|| format!("failed to delete {}", idx.display()))?;
+    }
+    Ok(())
+}
+
 // ── Save ──────────────────────────────────────────────────────────────────────
 
 /// Copy `src_image` into the data dir and write its `.idx` sidecar.
