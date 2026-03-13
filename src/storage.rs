@@ -1,0 +1,225 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+// ── Data directory ────────────────────────────────────────────────────────────
+
+/// Returns `~/.image_tagger/` (cross-platform via HOME / USERPROFILE).
+pub fn data_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".image_tagger")
+}
+
+fn ensure_data_dir() -> Result<PathBuf> {
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create data dir: {}", dir.display()))?;
+    Ok(dir)
+}
+
+// ── .idx path convention ──────────────────────────────────────────────────────
+
+/// Returns the `.idx` sidecar path for a given image.
+///
+/// `photo.jpg` → `photo.jpg.idx`
+pub fn idx_path_for(image_path: &Path) -> PathBuf {
+    let mut s = image_path.as_os_str().to_os_string();
+    s.push(".idx");
+    PathBuf::from(s)
+}
+
+// ── Public types ──────────────────────────────────────────────────────────────
+
+/// One entry in the library: image file + its parsed idx sidecar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LibraryEntry {
+    /// Absolute path to the image inside the data dir.
+    pub image_path: PathBuf,
+    /// Model tags saved at tagging time (name, score).
+    pub tags: Vec<(String, f32)>,
+    /// User-supplied custom tags.
+    pub custom_tags: Vec<String>,
+}
+
+impl LibraryEntry {
+    /// All tag names concatenated (model tags first, then custom).
+    pub fn all_tag_names(&self) -> Vec<String> {
+        self.tags
+            .iter()
+            .map(|(t, _)| t.clone())
+            .chain(self.custom_tags.iter().cloned())
+            .collect()
+    }
+
+    pub fn image_file_name(&self) -> String {
+        self.image_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+// ── Save ──────────────────────────────────────────────────────────────────────
+
+/// Copy `src_image` into the data dir and write its `.idx` sidecar.
+///
+/// If a file with the same name already exists, the image is renamed with a
+/// numeric suffix (the idx always matches the image that was actually stored).
+///
+/// Returns the path of the image in the data dir.
+pub fn save_entry(
+    src_image: &Path,
+    model_tags: &[(String, f32)],
+    custom_tags: &[String],
+) -> Result<PathBuf> {
+    let dir = ensure_data_dir()?;
+
+    let file_name = src_image
+        .file_name()
+        .context("image path has no file name")?;
+    let dest = dedup_path(&dir.join(file_name));
+
+    std::fs::copy(src_image, &dest)
+        .with_context(|| format!("failed to copy image to {}", dest.display()))?;
+
+    write_idx(&idx_path_for(&dest), model_tags, custom_tags)?;
+
+    Ok(dest)
+}
+
+// ── Load ──────────────────────────────────────────────────────────────────────
+
+/// Scan the data dir and return every (image, idx) pair that is well-formed.
+pub fn load_all_entries() -> Vec<LibraryEntry> {
+    let dir = data_dir();
+    if !dir.exists() {
+        return vec![];
+    }
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return vec![];
+    };
+
+    let mut entries: Vec<LibraryEntry> = rd
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            // Skip non-image files (including .idx files)
+            let ext = p.extension()?.to_str()?.to_lowercase();
+            if !matches!(
+                ext.as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif" | "tiff"
+            ) {
+                return None;
+            }
+            let idx = idx_path_for(&p);
+            if !idx.exists() {
+                return None;
+            }
+            parse_idx(&p, &idx).ok()
+        })
+        .collect();
+
+    // Stable order: sort alphabetically by file name
+    entries.sort_by(|a, b| a.image_file_name().cmp(&b.image_file_name()));
+    entries
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// idx file format:
+/// ```
+/// # image tagger index v1
+/// [tags]
+/// person=0.9321
+/// outdoor=0.8100
+/// [custom]
+/// golden hour
+/// portrait session
+/// ```
+fn write_idx(path: &Path, model_tags: &[(String, f32)], custom_tags: &[String]) -> Result<()> {
+    let mut out = String::from("# image tagger index v1\n[tags]\n");
+    for (tag, score) in model_tags {
+        out.push_str(&format!("{}={:.4}\n", tag, score));
+    }
+    out.push_str("[custom]\n");
+    for t in custom_tags {
+        let t = t.trim();
+        if !t.is_empty() {
+            out.push_str(t);
+            out.push('\n');
+        }
+    }
+    std::fs::write(path, out).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn parse_idx(image_path: &Path, idx_path: &Path) -> Result<LibraryEntry> {
+    let text = std::fs::read_to_string(idx_path)
+        .with_context(|| format!("failed to read {}", idx_path.display()))?;
+
+    let mut tags = Vec::new();
+    let mut custom_tags = Vec::new();
+    let mut section = "";
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "[tags]" {
+            section = "tags";
+            continue;
+        }
+        if line == "[custom]" {
+            section = "custom";
+            continue;
+        }
+        match section {
+            "tags" => {
+                if let Some((name, score_s)) = line.split_once('=') {
+                    let score = score_s.trim().parse::<f32>().unwrap_or(0.0);
+                    tags.push((name.trim().to_owned(), score));
+                }
+            }
+            "custom" => custom_tags.push(line.to_owned()),
+            _ => {}
+        }
+    }
+
+    Ok(LibraryEntry {
+        image_path: image_path.to_path_buf(),
+        tags,
+        custom_tags,
+    })
+}
+
+/// Returns `path` unchanged if it doesn't exist; otherwise appends `_1`, `_2`, …
+fn dedup_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let dir = path.parent().unwrap_or(Path::new("."));
+    for i in 1u32.. {
+        let name = if ext.is_empty() {
+            format!("{}_{}", stem, i)
+        } else {
+            format!("{}_{}.{}", stem, i, ext)
+        };
+        let candidate = dir.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
